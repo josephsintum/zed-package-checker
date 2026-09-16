@@ -1,0 +1,78 @@
+# zed-package-checker
+
+A [Zed](https://zed.dev) extension that flags **vulnerable and malicious dependencies**
+as editor diagnostics, across npm, Go modules and Python — the capability JetBrains
+IDEs get from their Package Checker plugin, which Zed has no equivalent for.
+
+Vulnerability data comes from [OSV.dev](https://osv.dev), matched **entirely on your
+machine**. Your dependency list never leaves the box.
+
+> **Status: early development.** Nothing is installable yet.
+> See [`docs/PLAN.md`](docs/PLAN.md) for the full design and staged build order.
+
+## How it works
+
+Zed extensions cannot publish diagnostics — only a language server can. So this is
+two pieces: a thin Rust→WASM shim that Zed loads, which downloads and launches a
+native Go language server that does the actual scanning.
+
+The server embeds [`osv-scanner/v2`](https://github.com/google/osv-scanner) as a
+library, scans the whole project on startup and on manifest changes, and anchors each
+finding on the line of the **manifest** dependency responsible — so a vulnerability in
+a transitive package shows up on the `express` line of your `package.json`, not in a
+lockfile you never open.
+
+## Stage 0 — feasibility findings
+
+Stage 0 was a throwaway probe answering the questions that could have invalidated the
+architecture. Recorded here so they don't have to be rediscovered.
+
+| # | Question | Answer |
+|---|---|---|
+| 1 | Does `pkg/osvscanner` cross-compile `CGO_ENABLED=0`? | **Yes** — all 6 targets (darwin/linux/windows × arm64/amd64) |
+| 2 | Stripped binary size? | **~41 MB** (39.8–43.5 MB). Well under the 80 MB threshold; no need to hand-pick extractors |
+| 3 | Is `PackageInfo.Inventory` non-nil at the API surface, with line numbers? | **Yes** — `Inventory.Location.Descriptor.File.LineNumber` returned `14` correctly |
+| 4 | Do the offline flags work without the env var? | **Yes** — `CompareOffline` + `LocalDBPath` + `DownloadDatabases` work programmatically |
+| 5 | Is the DB parsed per scan or cached per process? | **Per scan.** See below — this is the significant finding |
+| 6 | Do `packagejson`/`pyprojecttoml` extractors work via `PluginsEnabled`? | **Partially** — they load, but reading dependencies needs extra config |
+
+### Details worth keeping
+
+**The on-disk DB path is `osv-scalibr`, not `osv-scanner`.** The database lands at
+`<LocalDBPath>/osv-scalibr/<Ecosystem>/all.zip`.
+
+**`GroupInfo.MaxSeverity` is a numeric string** (`"8.1"`, `"5.3"`) — `strconv.ParseFloat`,
+no label mapping needed.
+
+**`Inventory.Location.Descriptor.File.Path` is root-relative with no leading slash**
+(e.g. `private/tmp/...`), because the scan root is `/`. Use `Source.Path` from the
+enclosing `PackageSource` for the absolute path and take only the line number from
+`File`.
+
+**`ParentIDs` is empty for npm**, as predicted — the transitive dependency graph has
+to be reconstructed from `package-lock.json` ourselves.
+
+**`packagejson` only reads dependencies when `includeDependencies` is set**, which comes
+from plugin-specific config (`ScalibrConfig`), not plain `PluginsEnabled`. It also reads
+only `dependencies` — not `devDependencies`, `optionalDependencies` or `peerDependencies`.
+
+### The performance finding
+
+`zipDB.load()` runs **on every scan**, not once per process. Measured on a
+one-dependency fixture against the real npm database:
+
+| | Wall time | Allocated |
+|---|---|---|
+| Scan 1 (incl. 205 MB download) | 11.2 s | 3.4 GB |
+| Scan 2 (same process, warm disk) | **4.5 s** | 3.1 GB |
+
+The cost is fixed regardless of project size — it decompresses and `protojson.Unmarshal`s
+every advisory in the ecosystem (~100k for npm) and keeps the handful that match. A
+4.5 second, 3 GB scan on every file save is not viable for an editor, so the compact
+derived index described in `docs/PLAN.md` moves from "deferred optimization" to
+required work.
+
+## License
+
+Apache-2.0. Vulnerability data from OSV.dev and the GitHub Advisory Database is
+CC-BY 4.0.

@@ -405,17 +405,40 @@ All of `internal/model`, plus the interface declarations each consumer needs. No
 
 ### Stage 3 — `extract` package
 
-The osv-scalibr driver behind `Extractor`, returning `[]ExtractedPackage`. Functional options; `ErrVulnerabilitiesFound` treated as the success path; `TransitiveScanning.Disabled: true` (the network-backed resolver — would break the offline guarantee); `ExcludePatterns` for `node_modules`/`.venv`/`vendor`; **`PluginsEnabled` adds `packagejson` and `pyprojecttoml`** with `FromRange` set on their findings; dedup by `(package, version, advisory)`. `osvschema.Vulnerability` is a protobuf — getters only, never `encoding/json`.
+The osv-scalibr driver behind `Extractor`, returning `[]ExtractedPackage`. Extraction
+only: it reports what a project depends on, with no advisory data involved — matching is
+Stage 5.
 
-Exercised by a **throwaway CLI harness** (`cmd/scanharness`), not the LSP, so scanning is validated independently of the editor.
+Extractors are constructed directly (`packagejson.New(cfg)` and friends) rather than
+resolved through scalibr's plugin registry, because `packagejson` only reads dependencies
+when `IncludeDependencies` is set, and that comes from a plugin-specific config proto
+that `PluginsEnabled` cannot express.
 
-The skip list moves here from `internal/lsp` and becomes config-driven from the
-start: `SkipDirRegex` built from the built-in names plus any `exclude` patterns.
-Retrofitting configurability onto a hardcoded list after three call sites depend
-on it is the expensive order to do this in.
+Details the Stage 0 probe settled:
+
+- `StoreAbsolutePath: true`, or paths come back relative to `/` with no leading slash.
+- `SkipDirRegex`, not `DirsToSkip` — the latter wants paths relative to the scan roots,
+  so bare names like `node_modules` fail. Built from the built-in list (moved here from
+  `internal/lsp`) plus any `exclude` setting, config-driven from the start.
+- A package found by two extractors is returned twice, once from the manifest and once
+  from the lockfile, so results are deduplicated.
+- The project's own `name@version` is extracted alongside its dependencies and must be
+  dropped; it is not a dependency of itself.
+- `PURLType` is a purl type ("golang"), not an OSV ecosystem name ("Go"); unsupported
+  types are skipped rather than erroring.
+- Line numbers are one-based and become `model.Site` through `WholeLine`.
+
+Exercised by a **throwaway CLI harness** (`cmd/extractharness`), not the LSP, so
+extraction is validated independently of the editor.
 
 **Review:** `internal/extract/*.go`.
-**Gate:** `scanharness testdata/fixtures/npm-direct` prints real GHSA IDs with line numbers; `npm-nolock` prints findings with `FromRange`. **Measure and record: wall time and peak RSS for a scan** against the real npm DB on a mid-size project. `go test -race ./internal/scan/...` against `testdata/osvdb/`.
+**Gate:**
+- `extractharness testdata/fixtures/npm-direct` prints `npm:lodash@4.17.15` twice —
+  `package.json:5` and `package-lock.json:14` — collapsed to one by dedup, with the
+  fixture's own package absent.
+- `npm-nolock` prints the same package with `FromRange` set, resolved from `^4.17.15`.
+- `go test -race ./internal/extract/...` against committed fixtures. No network, no
+  advisory database: this stage touches neither.
 
 ### Stage 4 — `db` package
 

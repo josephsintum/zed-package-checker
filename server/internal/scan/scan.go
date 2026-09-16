@@ -50,7 +50,16 @@ type Scanner struct {
 	index     *db.Index
 	indexedAt time.Time
 	warming   bool
+
+	// A background download outlives the scan that started it, so the Scanner
+	// owns it: done stops it, wg makes the stop observable.
+	done     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
+
+// warmTimeout bounds a background download.
+const warmTimeout = 30 * time.Minute
 
 // Option configures a Scanner.
 type Option func(*Scanner)
@@ -60,7 +69,12 @@ func OnDatabaseReady(f func()) Option { return func(s *Scanner) { s.onReady = f 
 
 // New builds a Scanner.
 func New(log *slog.Logger, extractor Extractor, database Database, opts ...Option) *Scanner {
-	s := &Scanner{extractor: extractor, database: database, log: log}
+	s := &Scanner{
+		extractor: extractor,
+		database:  database,
+		log:       log,
+		done:      make(chan struct{}),
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -86,7 +100,7 @@ func (s *Scanner) Scan(ctx context.Context, root string) (model.Report, error) {
 
 	ecosystems := ecosystemsOf(pkgs)
 	if !s.database.Ready(ecosystems) {
-		s.warmInBackground(ecosystems)
+		s.warmInBackground(ctx, ecosystems)
 		return model.Report{}, fmt.Errorf("%w: %v", db.ErrNotReady, ecosystems)
 	}
 
@@ -134,13 +148,23 @@ func (s *Scanner) Invalidate() {
 	s.index = nil
 }
 
+// Close stops any background download and waits for it to unwind.
+//
+// Safe to call more than once, and safe to call on a Scanner that never
+// downloaded anything.
+func (s *Scanner) Close() error {
+	s.stopOnce.Do(func() { close(s.done) })
+	s.wg.Wait()
+	return nil
+}
+
 // warmInBackground downloads the archives for ecosystems without blocking the
 // scan, and asks for a rescan once they land.
 //
 // Only one warm runs at a time: a project with a missing database produces a
 // failed scan on every trigger, and each of those must not start its own
 // download.
-func (s *Scanner) warmInBackground(ecosystems []model.Ecosystem) {
+func (s *Scanner) warmInBackground(ctx context.Context, ecosystems []model.Ecosystem) {
 	s.mu.Lock()
 	if s.warming {
 		s.mu.Unlock()
@@ -149,7 +173,15 @@ func (s *Scanner) warmInBackground(ecosystems []model.Ecosystem) {
 	s.warming = true
 	s.mu.Unlock()
 
-	go func() {
+	// Deliberately not the scan's context: the download must survive the scan
+	// that triggered it being cancelled, or it would restart from nothing on
+	// every attempt. WithoutCancel drops the cancellation but keeps the values,
+	// so whatever the request context carries is still reachable from here —
+	// which is what lets progress be reported to the editor.
+	warmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), warmTimeout)
+
+	s.wg.Go(func() {
+		defer cancel()
 		defer func() {
 			s.mu.Lock()
 			s.warming = false
@@ -157,13 +189,7 @@ func (s *Scanner) warmInBackground(ecosystems []model.Ecosystem) {
 		}()
 
 		s.log.Info("downloading advisory database", "ecosystems", ecosystems)
-		// Not the scan's context: the download must survive the scan that
-		// triggered it being cancelled, or it would restart from nothing on
-		// every attempt.
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-		defer cancel()
-
-		if err := s.database.Ensure(ctx, ecosystems); err != nil {
+		if err := s.database.Ensure(warmCtx, ecosystems); err != nil {
 			s.log.Warn("advisory database download failed", "error", err)
 			return
 		}
@@ -173,7 +199,17 @@ func (s *Scanner) warmInBackground(ecosystems []model.Ecosystem) {
 		if s.onReady != nil {
 			s.onReady()
 		}
-	}()
+	})
+
+	// Close must interrupt a download rather than wait out warmTimeout. This
+	// exits as soon as the download finishes, since that cancels warmCtx.
+	s.wg.Go(func() {
+		select {
+		case <-s.done:
+			cancel()
+		case <-warmCtx.Done():
+		}
+	})
 }
 
 // NotReady reports whether err means the database is still downloading, rather

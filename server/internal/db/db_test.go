@@ -108,6 +108,96 @@ func (target redirectTo) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(clone)
 }
 
+// recordingProgress captures the Progress calls fetch makes.
+type recordingProgress struct {
+	mu         sync.Mutex
+	starts     int
+	advances   int
+	dones      int
+	total      int64
+	downloaded int64
+	err        error
+}
+
+func (r *recordingProgress) Start(_ context.Context, _ model.Ecosystem, total int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.starts++
+	r.total = total
+}
+
+func (r *recordingProgress) Advance(_ context.Context, _ model.Ecosystem, downloaded, _ int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.advances++
+	r.downloaded = downloaded
+}
+
+func (r *recordingProgress) Done(_ context.Context, _ model.Ecosystem, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.dones++
+	r.err = err
+}
+
+func TestDownloadReportsProgress(t *testing.T) {
+	// The link between the download and the editor: without this the 205 MB
+	// first run looks like a hang.
+	srv := newArchiveServer(t, fakeArchive(t, map[string]string{"GHSA-1.json": "{}"}))
+	rec := &recordingProgress{}
+	d := newTestDB(t, srv, WithProgress(rec))
+
+	if err := d.Ensure(context.Background(), []model.Ecosystem{model.EcosystemNPM}); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.starts != 1 || rec.dones != 1 {
+		t.Errorf("starts=%d dones=%d, want 1 of each", rec.starts, rec.dones)
+	}
+	if rec.err != nil {
+		t.Errorf("Done reported %v, want success", rec.err)
+	}
+	if rec.advances == 0 {
+		t.Error("no progress reported between start and done")
+	}
+	if rec.downloaded <= 0 {
+		t.Errorf("final downloaded = %d, want the archive size", rec.downloaded)
+	}
+	if rec.total > 0 && rec.downloaded != rec.total {
+		t.Errorf("downloaded %d of a stated %d; the counts must agree at the end",
+			rec.downloaded, rec.total)
+	}
+}
+
+func TestACachedArchiveReportsNoProgress(t *testing.T) {
+	// A 304 moves no bytes, so opening a progress entry for it would flash an
+	// empty download at the user on every startup.
+	srv := newArchiveServer(t, fakeArchive(t, map[string]string{"GHSA-1.json": "{}"}))
+	rec := &recordingProgress{}
+	d := newTestDB(t, srv, WithProgress(rec), WithTTL(0))
+
+	ctx := context.Background()
+	if err := d.Ensure(ctx, []model.Ecosystem{model.EcosystemNPM}); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+	rec.mu.Lock()
+	afterFirst := rec.starts
+	rec.mu.Unlock()
+
+	if err := d.Ensure(ctx, []model.Ecosystem{model.EcosystemNPM}); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.starts != afterFirst {
+		t.Errorf("starts went %d -> %d across a revalidation that moved no bytes",
+			afterFirst, rec.starts)
+	}
+}
+
 func TestEnsureDownloadsThenReusesCache(t *testing.T) {
 	srv := newArchiveServer(t, fakeArchive(t, map[string]string{"GHSA-1.json": "{}"}))
 	d := newTestDB(t, srv)

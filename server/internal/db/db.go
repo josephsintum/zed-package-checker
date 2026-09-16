@@ -42,12 +42,33 @@ const defaultTTL = 24 * time.Hour
 // short enough that a dead peer does not hang a scan forever.
 const peerWait = 15 * time.Minute
 
+// Progress observes a download so it can be shown to the user.
+//
+// npm's archive is 205 MB and the first scan of a JS project blocks on it, so
+// without this the editor sits silent for minutes and the extension reads as
+// broken. Implementations are called from the goroutine driving the download
+// and must not block it.
+//
+// total is -1 when the server sent no Content-Length, in which case only the
+// running byte count is meaningful.
+type Progress interface {
+	// Start is called once, before any bytes are read.
+	Start(ctx context.Context, e model.Ecosystem, total int64)
+
+	// Advance is called repeatedly, already rate-limited by the caller.
+	Advance(ctx context.Context, e model.Ecosystem, downloaded, total int64)
+
+	// Done is called exactly once per Start, with the outcome.
+	Done(ctx context.Context, e model.Ecosystem, err error)
+}
+
 // DB manages the on-disk advisory archives.
 type DB struct {
 	root       string
 	httpClient *http.Client
 	log        *slog.Logger
 	ttl        time.Duration
+	progress   Progress
 
 	// now is overridable so staleness can be tested without sleeping.
 	now func() time.Time
@@ -64,6 +85,9 @@ func WithHTTPClient(c *http.Client) Option { return func(d *DB) { d.httpClient =
 
 // WithTTL sets how long a downloaded archive is trusted before being rechecked.
 func WithTTL(ttl time.Duration) Option { return func(d *DB) { d.ttl = ttl } }
+
+// WithProgress reports download advance. Nothing is reported without it.
+func WithProgress(p Progress) Option { return func(d *DB) { d.progress = p } }
 
 // withClock overrides the clock, for tests.
 func withClock(now func() time.Time) Option { return func(d *DB) { d.now = now } }

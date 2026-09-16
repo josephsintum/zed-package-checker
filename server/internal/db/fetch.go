@@ -56,14 +56,30 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 
 	wantCRC, haveCRC := crc32cFromHeader(resp.Header)
 
+	// resp.ContentLength is -1 when the server sends no length, which the
+	// progress reporter is expected to handle rather than guess around.
+	src := io.Reader(resp.Body)
+	if d.progress != nil {
+		d.progress.Start(ctx, e, resp.ContentLength)
+		src = &progressReader{
+			r: resp.Body,
+			report: func(downloaded int64) {
+				d.progress.Advance(ctx, e, downloaded, resp.ContentLength)
+			},
+		}
+	}
+
 	var written int64
 	err = writeAtomic(archive, func(w io.Writer) error {
-		n, copyErr := io.Copy(w, resp.Body)
+		n, copyErr := io.Copy(w, src)
 		written = n
 		return copyErr
 	}, func(tmp string) error {
 		return verifyArchive(tmp, wantCRC, haveCRC)
 	})
+	if d.progress != nil {
+		d.progress.Done(ctx, e, err)
+	}
 	if err != nil {
 		return false, fmt.Errorf("install %s: %w", archive, err)
 	}
@@ -80,6 +96,36 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 	d.log.Info("database updated",
 		"ecosystem", e.String(), "bytes", written, "url", url)
 	return true, nil
+}
+
+// progressInterval is the shortest gap between two progress reports.
+//
+// io.Copy uses a 32 KiB buffer, so a 205 MB archive is over six thousand reads
+// and every report is an editor notification. Time-based rather than
+// byte-based, so a slow link still reports steadily and a fast one does not
+// flood.
+const progressInterval = 200 * time.Millisecond
+
+// progressReader counts bytes on their way through and reports them, at most
+// once per progressInterval plus once at the end.
+type progressReader struct {
+	r      io.Reader
+	report func(downloaded int64)
+
+	read int64
+	last time.Time
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	p.read += int64(n)
+
+	now := time.Now()
+	if p.last.IsZero() || err != nil || now.Sub(p.last) >= progressInterval {
+		p.last = now
+		p.report(p.read)
+	}
+	return n, err
 }
 
 // verifyArchive checks a freshly downloaded file before it is published.

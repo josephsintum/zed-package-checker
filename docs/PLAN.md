@@ -440,7 +440,7 @@ extraction is validated independently of the editor.
 - `go test -race ./internal/extract/...` against committed fixtures. No network, no
   advisory database: this stage touches neither.
 
-### Stage 4 — `db` package: fetching and cross-process safety
+### Stage 4 — `db` package: fetching and cross-process safety — **DONE**
 
 Owns the local copy of the OSV database as a set of files on disk. Nothing in this stage
 parses an advisory — that is Stage 5.
@@ -470,7 +470,7 @@ locking rules.
 - **Torn-read**: one process rewriting the archive in a loop while another reads it in a
   loop; no read ever fails.
 
-### Stage 5 — `db` package: loading and the in-memory index
+### Stage 5 — `db` package: loading and the in-memory index — **DONE** (see README for measurements)
 
 Turns those files into something matchable, per "Loading the database" above: stream the
 archive from disk rather than reading 205 MB into memory, parse once per process into a

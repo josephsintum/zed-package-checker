@@ -146,6 +146,33 @@ Also worth keeping: a workspace root is typically a repository whose manifests s
 several directories down, so scanning must walk the tree. Checking the root alone
 finds nothing in a real project.
 
+## Database loading
+
+Stage 5 replaced osv-scanner's per-scan parse with a streamed load into a
+compact in-memory index, built once per process and rebuilt only when the
+archives change.
+
+| Ecosystem | Advisories | Load | Retained | Peak RSS |
+|---|---|---|---|---|
+| crates.io | 2,700 | 74 ms | 3 MB | 22 MB |
+| Go | 9,082 | 214 ms | 11 MB | 38 MB |
+| npm | 228,368 | 3.5 s | 110 MB | 341 MB |
+
+Against a baseline of 600 MB and 4.5 s **on every scan**. Lookups are now map
+accesses, and only the ecosystems a project actually uses are loaded — a Go
+project holds 11 MB rather than npm's 110 MB.
+
+Two findings worth keeping:
+
+**Advisory prose dominated the index.** The `details` field averages 662 bytes
+and, across npm's 228k advisories, accounted for 151 MB of a 257 MB index —
+retained so that hover text could be rendered for the two or three advisories a
+project actually matches. It is now read from the archive on demand, which took
+retained memory to 110 MB and peak RSS from 559 MB to 341 MB.
+
+**97% of npm's archive is `MAL-` entries**, not CVEs. The ecosystem's size is
+driven by the malicious-package feed rather than by vulnerability data.
+
 ## License
 
 Apache-2.0. Vulnerability data from OSV.dev and the GitHub Advisory Database is

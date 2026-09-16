@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/db"
@@ -32,6 +33,8 @@ func main() {
 func run() error {
 	root := flag.String("root", "", "cache directory (default: the real user cache)")
 	runs := flag.Int("runs", 2, "how many times to call Ensure, to show cache reuse")
+	load := flag.Bool("load", false, "also build the in-memory index and report its size")
+	scans := flag.Int("scans", 0, "lookups to perform after loading, to show the index is reused")
 	verbose := flag.Bool("v", false, "show the database's own logging")
 	flag.Parse()
 
@@ -71,6 +74,37 @@ func run() error {
 		}
 		fmt.Printf("  run %d  %8v  ready=%v\n",
 			i, time.Since(start).Round(time.Millisecond), d.Ready(ecosystems))
+	}
+
+	if *load {
+		start := time.Now()
+		idx, err := d.Load(context.Background(), ecosystems)
+		if err != nil {
+			return err
+		}
+		elapsed := time.Since(start)
+
+		var ms runtime.MemStats
+		runtime.GC() // settle the heap so HeapAlloc reflects what is retained
+		runtime.ReadMemStats(&ms)
+		runtime.KeepAlive(idx)
+
+		fmt.Printf("\nindex: %d advisories over %d packages in %v\n",
+			idx.Advisories(), idx.Packages(), elapsed.Round(time.Millisecond))
+		fmt.Printf("  retained heap after load: %.1f MB\n", float64(ms.HeapAlloc)/(1<<20))
+
+		for i := 0; i < *scans; i++ {
+			idx.Lookup(model.PackageKey{Ecosystem: ecosystems[0], Name: "lodash"})
+		}
+		if *scans > 0 {
+			runtime.GC()
+			runtime.ReadMemStats(&ms)
+			fmt.Printf("  retained heap after %d lookups: %.1f MB\n",
+				*scans, float64(ms.HeapAlloc)/(1<<20))
+		}
+		// Without this the index is unreachable by the time the stats are
+		// read, and the numbers above measure a collected heap.
+		runtime.KeepAlive(idx)
 	}
 
 	fmt.Println()

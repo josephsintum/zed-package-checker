@@ -1,0 +1,34 @@
+id = "package-checker"
+name = "Package Checker"
+description = "Flags vulnerable and malicious dependencies as diagnostics, matched offline against OSV."
+version = "0.0.1"
+schema_version = 1
+authors = ["Joseph Sintum <josephsintum@gmail.com>"]
+repository = "https://github.com/josephsintum/zed-package-checker"
+
+[language_servers.package-checker]
+name = "Package Checker"
+# One server instance runs per worktree regardless of how many languages are
+# listed (Zed keys instances by worktree + server name, not language), so
+# listing broadly only adds start triggers, not processes.
+#
+# Source languages are listed deliberately: opening any .go/.py/.ts file starts
+# the server, which then scans the whole project including manifests that have
+# no Zed language of their own (yarn.lock, go.sum, poetry.lock).
+#
+# TOML is third-party (zed-extensions/toml) and simply inert when absent.
+languages = [
+    "JSON",
+    "JSONC",
+    "Go",
+    "Go Mod",
+    "Python",
+    "Plain Text",
+    "TOML",
+    "YAML",
+    "JavaScript",
+    "TypeScript",
+    "TSX",
+    "Rust",
+]
+code_action_kinds = ["quickfix"]

@@ -102,6 +102,35 @@ Confirmed in the same probe:
 - The manifest's own package (`npm-direct-fixture@1.0.0`) is extracted alongside its
   dependencies and must be filtered out.
 
+## Stage 1 — walking skeleton
+
+Proved the whole pipe end to end — Zed loads the extension, the shim resolves and
+spawns the binary, and diagnostics reach the editor — before any real scanning
+exists. Verified in Zed against this repository as the workspace:
+
+- The extension compiles and installs; the server runs at ~13 MB resident.
+- `positionEncoding` negotiates to **utf-8**, so manifest byte offsets can be used
+  as columns directly with no conversion.
+- Three `package.json` files under `probe/` and `server/testdata/` each receive a
+  diagnostic.
+
+Two findings that settle open design questions:
+
+**Zed displays diagnostics for files that were never opened.** Two of the three
+manifests had no buffer open and still appeared in the diagnostics panel. The
+concern from [zed#42784](https://github.com/zed-industries/zed/issues/42784) does
+not apply to unsolicited server-pushed diagnostics, so re-publishing on `didOpen`
+is defensive rather than load-bearing. Anchoring transitive findings on the
+manifest remains the right design regardless, because it is where the user can
+act on them.
+
+**`codeDescription` renders as a clickable link** in the diagnostic, so advisory
+URLs reach the user without needing hover support.
+
+Also worth keeping: a workspace root is typically a repository whose manifests sit
+several directories down, so scanning must walk the tree. Checking the root alone
+finds nothing in a real project.
+
 ## License
 
 Apache-2.0. Vulnerability data from OSV.dev and the GitHub Advisory Database is

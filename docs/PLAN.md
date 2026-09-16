@@ -59,7 +59,7 @@ The lock-in is osv-scanner itself, which is why `internal/scan` is the only pack
 ## Zed platform constraints
 
 1. **Extensions cannot publish diagnostics.** The `zed:extension` WIT world exports `language-server-command` and little else. The only way to get a squiggle is to *be a language server*; the extension is a Rust→WASM shim that downloads and launches a native binary.
-2. **The diagnostics panel favours open buffers** ([zed#42784](https://github.com/zed-industries/zed/issues/42784)). So transitive findings are **anchored to the manifest line of the top-level dependency that pulls them in** — `express` gets the squiggle, not a lockfile nobody opens. Further mitigated by re-publishing cached diagnostics on `didOpen`.
+2. **Diagnostics for closed buffers work** — verified in Stage 1: files that were never opened still appear in the diagnostics panel when the server pushes them. Transitive findings are still **anchored to the manifest line of the top-level dependency that pulls them in** — `express` gets the squiggle, not a lockfile nobody opens — but for usability rather than necessity: the manifest is where the user can actually act. Re-publishing on `didOpen` is retained as cheap insurance.
 3. **Language attachment is an explicit enumeration.** [`zed-typos`](https://github.com/BaptisteRoseau/zed-typos) lists ~80 language names, most not built-in, and works — so listing languages from other extensions is safe and idiomatic. One server runs per worktree regardless of list length.
 4. **`zed_extension_api` 0.8.0 is unpublished** (`publish = false` in-tree). Build against **`0.7`** — confirmed as crates.io's max version.
 
@@ -307,7 +307,7 @@ Everything that could invalidate the architecture and that a source read cannot 
 
 **Gate:** all six targets build, size is acceptable, `Inventory` is non-nil with real line numbers, #5 and #6 answered. Findings recorded in the README. If #3 fails, `locate` grows substantially and we re-plan before building anything on top.
 
-### Stage 1 — Walking skeleton
+### Stage 1 — Walking skeleton — **DONE**
 
 Repo scaffolding, `extension.toml`, the Rust shim pointing at a **local** binary path, and a Go server that implements only `initialize`/`initialized` and publishes one **hardcoded** diagnostic on line 1 of `package.json`. Negotiate `positionEncoding` here (prefer `utf-8`) so the encoding decision is settled before any real ranges exist.
 
@@ -457,7 +457,7 @@ Settings schema via `initializationOptions`, monorepo exclude tuning, README wit
 | ~~`CGO_ENABLED=0` cross-compile~~ | **Resolved Stage 0**: all 6 targets build |
 | ~~`packagejson` line numbers~~ | **Resolved Stage 0**: works with `IncludeDependencies` config |
 | ~~Offline flags / `MaxSeverity` format~~ | **Resolved Stage 0**: flags work; `MaxSeverity` is a numeric string |
-| Zed's handling of diagnostics for closed buffers | Stage 1 |
+| ~~Zed's handling of diagnostics for closed buffers~~ | **Resolved Stage 1**: Zed *does* show diagnostics for never-opened files. `didOpen` re-publish is now defensive, not load-bearing |
 | Range heuristic false positives when the installed version is newer | Accepted for v1; installed-package scanning is the follow-up |
 | **We now own version-range matching** — per-ecosystem semantics are subtle | `deps.dev/util/semver`; differential-test `match` against osv-scanner's own results |
 | **We now own an index pipeline** — it can break or go stale | Index carries a build timestamp; server warns when older than 7 days |

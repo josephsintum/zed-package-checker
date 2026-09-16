@@ -1,0 +1,14 @@
+[package]
+name = "zed_package_checker"
+version = "0.0.1"
+edition = "2021"
+publish = false
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# 0.8.0 exists in-tree but is marked publish = false; 0.7.0 is the crates.io max.
+zed_extension_api = "0.7"

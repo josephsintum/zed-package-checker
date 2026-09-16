@@ -19,20 +19,7 @@ import (
 // without judging it, and returns an empty slice rather than an error when a
 // project has no manifests.
 type Extractor interface {
-	Extract(ctx context.Context, root string) ([]ExtractedPackage, error)
-}
-
-// ExtractedPackage is one dependency found in a project, before matching.
-type ExtractedPackage struct {
-	Package model.Package
-
-	// Evidence is the file and line it was found at.
-	Evidence model.Site
-
-	DepGroups []string
-
-	// FromRange means the version came from a range, not a lockfile.
-	FromRange bool
+	Extract(ctx context.Context, root string) ([]model.ExtractedPackage, error)
 }
 
 // Matcher reports which advisories affect a set of packages.

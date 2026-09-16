@@ -90,7 +90,7 @@ Everything below was read directly, not inferred:
 | `ParentIDs` is **not** populated for npm — the transitive graph is ours to build | `packagelockjson.go:337-348` sets no `ID`/`ParentIDs` |
 | `packagejson`/`pyprojecttoml` extractors are **off by default** | `presets.go` `lockfile` preset: 0 references to either |
 
-One caveat surfaced by the first row: `toolchain` *is* part of the server key, so a Python project with several virtualenvs could spawn extra instances. We declare no toolchain, so this should not apply — confirm at Stage 12.
+One caveat surfaced by the first row: `toolchain` *is* part of the server key, so a Python project with several virtualenvs could spawn extra instances. We declare no toolchain, so this should not apply — confirm at Stage 13.
 
 Because `Rust` and `Plain Text` are in the language list, the server starts for nearly every project. It must **idle cheaply** when there is nothing to do: on `ErrNoPackagesFound`, no DB download, no refresh timer, no watchers beyond the manifest globs.
 
@@ -105,7 +105,7 @@ Because `Rust` and `Plain Text` are in the language list, the server starts for 
 | Vulnerability data | **Local OSV database**, refreshed in background. No per-scan network. |
 | MVP ecosystems | **npm, Go, Python** (Cargo as stretch) |
 | Manifests without lockfiles | **Enable `packagejson` + `pyprojecttoml` extractors**; ranges scan at their lowest satisfying version (the heuristic `requirements` already uses); message says "range may include vulnerable versions". Installed-package scanning (`site-packages`, `node_modules`) for exact versions is a post-v1 follow-up |
-| npm workspaces | **In scope for Stage 10** — one root lockfile, many manifests, attribution to the correct sub-package |
+| npm workspaces | **In scope for Stage 11** — one root lockfile, many manifests, attribution to the correct sub-package |
 | Reachability | **Go only**, `reachability/go/source` plugin, default off |
 | Extension shim | Rust → WASM, resolves binary by release tag, **verifies SHA-256** before executing |
 | Debounce | **1000 ms** (matches JetBrains) |
@@ -251,7 +251,7 @@ Each `all.zip` holds every advisory for that ecosystem as OSV-schema JSON. Sourc
 
 **Measured sizes** (via `Content-Length`, not estimated): npm **205.2 MB**, PyPI 32.7 MB, Go 11.1 MB, Packagist 10.1 MB, Maven 9.7 MB, RubyGems 4.1 MB, crates.io 3.3 MB. We download only the ecosystems present in the worktree. npm is large because it is dominated by `MAL-` malicious-package reports — which is the malicious-dependency feature itself, so it can't simply be dropped.
 
-**The load cost.** osv-scanner's `zipDB.load()` (`osvlocal/zip.go:210-234`) reads the whole zip into memory and **decompresses and `protojson.Unmarshal`s every advisory in the ecosystem**, keeping only those touching packages present. Retained memory is small; peak memory is ~205 MB for npm and the CPU cost is on the order of 100k JSON parses. Whether this happens **per scan or once per process** decides whether the 1 s debounce is meaningful — it is a Stage 0 question, and Stage 3 measures duration *and* peak RSS. If it's per scan and slow, the first remedy is a compact derived index (see Stage 4), not a daemon.
+**The load cost.** osv-scanner's `zipDB.load()` (`osvlocal/zip.go:210-234`) reads the whole zip into memory and **decompresses and `protojson.Unmarshal`s every advisory in the ecosystem**, keeping only those touching packages present. Retained memory is small; peak memory is ~205 MB for npm and the CPU cost is on the order of 100k JSON parses. Stage 0 confirmed this happens **per scan**, not once per process. The remedy is loading the database properly at runtime (Stage 5), not a persistent index or a daemon.
 
 ### Loading the database
 
@@ -284,9 +284,9 @@ persistent on-disk index would additionally avoid that one-off startup parse, bu
 buys only a few seconds nobody is waiting on, and costs a versioned format, a builder, a
 reader, invalidation, and cross-process coordination so two editor windows do not
 rebuild at once — machinery that can be *wrong*, in a tool whose value depends on being
-right. Reconsider only if Stage 4's measurements are bad.
+right. Reconsider only if Stage 5's measurements are bad.
 
-**Unmeasured, and worth measuring at Stage 4 rather than reasoning about:** peak RSS once
+**Unmeasured, and worth measuring at Stage 5 rather than reasoning about:** peak RSS once
 streaming, the retained size of the compact index, and whether the 600 → 922 MB growth
 continues or plateaus. Two data points are not a trend.
 
@@ -374,7 +374,7 @@ Each stage is testable in isolation because of the interface seams:
 
 ## Stages
 
-Each stage is a reviewable unit: it ends with code you read, a command you run, and a gate that must pass before the next begins. Each lands as its own commit. `locate` (Stage 8) deliberately comes *after* the first end-to-end (Stage 7): `Inventory` already supplies line numbers, so real diagnostics appear in Zed one stage sooner, and `locate` then only adds precise spans for the code action.
+Each stage is a reviewable unit: it ends with code you read, a command you run, and a gate that must pass before the next begins. Each lands as its own commit. `locate` (Stage 9) deliberately comes *after* the first end-to-end (Stage 8): `Inventory` already supplies line numbers, so real diagnostics appear in Zed one stage sooner, and `locate` then only adds precise spans for the code action.
 
 ### Stage 0 — Feasibility probe — **DONE** (see README for results; code in `probe/`)
 
@@ -403,11 +403,11 @@ All of `internal/model`, plus the interface declarations each consumer needs. No
 **Review:** every type in `internal/model`, every interface.
 **Gate:** `go build ./...`, `go vet`, doc comments on all exported items. Review is the gate.
 
-### Stage 3 — `extract` package
+### Stage 3 — `extract` package — **DONE**
 
 The osv-scalibr driver behind `Extractor`, returning `[]ExtractedPackage`. Extraction
 only: it reports what a project depends on, with no advisory data involved — matching is
-Stage 5.
+Stage 6.
 
 Extractors are constructed directly (`packagejson.New(cfg)` and friends) rather than
 resolved through scalibr's plugin registry, because `packagejson` only reads dependencies
@@ -440,32 +440,58 @@ extraction is validated independently of the editor.
 - `go test -race ./internal/extract/...` against committed fixtures. No network, no
   advisory database: this stage touches neither.
 
-### Stage 4 — `db` package
+### Stage 4 — `db` package: fetching and cross-process safety
 
-Offline OSV database lifecycle, per the layout, paths and cross-process rules above. Download only ecosystems present in the worktree. Background refresh past 24 h with `If-Modified-Since`. Explicit `ErrDatabaseNotReady` rather than silently-empty results.
+Owns the local copy of the OSV database as a set of files on disk. Nothing in this stage
+parses an advisory — that is Stage 5.
 
-Also owns **loading**, per "Loading the database" above: ecosystem filtering first, then
-streaming from disk, then the compact in-memory index rebuilt only on refresh. The
-download stays simple — full ecosystem zips as published, npm's 205 MB included, in the
-background so the editor stays usable, with other ecosystems scannable meanwhile.
+Downloads only the ecosystems present in the worktree, so a Go project fetches 11 MB and
+a Python one 33 MB rather than npm's 205 MB. Refreshes in the background past 24 h using
+`If-Modified-Since`. Reports `ErrDatabaseNotReady` explicitly rather than returning
+silently-empty results, since "still downloading" and "nothing is vulnerable" must not
+look alike.
 
-**Review:** `internal/db/*.go`, especially goroutine lifecycle, context handling, and the cross-process safety rules.
+The cross-process rules above are the substance of this stage: osv-scanner's own cache
+handling is unsafe for concurrent processes, and Zed runs one server per worktree.
+Atomic temp-then-rename, validate before publishing, `TryLock` on the scan path with a
+background waiter for the process that skipped, startup self-heal, and a rename retry
+for Windows.
+
+**Review:** `internal/db/*.go`, especially goroutine lifecycle, context handling and the
+locking rules.
 **Gate:**
-- Cold start downloads; second start doesn't.
-- **Measure and record peak RSS** for: a Go-only project, a Python-only project, and an
-  npm project, each at startup and after five scans. These are the numbers that decide
-  whether anything further is needed; record them in the README next to Stage 0's.
-- An npm project's steady-state RSS after the index is built is well under the 600 MB
-  baseline, and does not grow across five scans.
-- **Offline assertion**: with the DB cached, run the harness under `tcpdump -i any -n 'not port 53'` and confirm zero egress. This is the privacy claim — tested, not assumed.
-- **Concurrency**: launch 3 harness processes simultaneously against one empty cache. Exactly one downloads; the other two skip, wait, and **scan successfully once it finishes**.
-- **Corruption recovery**: truncate `all.zip` to half its size, start the server, confirm it detects, re-fetches and scans successfully.
-- **Torn-read**: while one process rewrites the zip in a loop, another scans in a loop; no scan ever fails.
+- Cold start downloads; second start doesn't; a Go-only project never fetches npm.
+- **Offline assertion**: with the database cached, run under `tcpdump -i any -n 'not port 53'`
+  and confirm zero egress. This is the privacy claim — tested, not assumed.
+- **Concurrency**: three processes against one empty cache. Exactly one downloads; the
+  other two skip, wait, and become ready once it finishes.
+- **Corruption recovery**: truncate `all.zip` to half its length, start the server, confirm
+  it detects, re-fetches and works.
+- **Torn-read**: one process rewriting the archive in a loop while another reads it in a
+  loop; no read ever fails.
 
-### Stage 5 — `match` package
+### Stage 5 — `db` package: loading and the in-memory index
+
+Turns those files into something matchable, per "Loading the database" above: stream the
+archive from disk rather than reading 205 MB into memory, parse once per process into a
+compact `map[PackageKey][]Advisory` keeping only the fields matching needs, and rebuild
+only when the database refreshes — never per scan.
+
+This is where the Stage 0 memory finding gets resolved, and where we learn whether the
+remedy was necessary or merely tidy.
+
+**Review:** the loader and index types.
+**Gate:**
+- **Measure and record peak RSS** for a Go-only, a Python-only and an npm project, each at
+  startup and after five scans. Record them in the README beside Stage 0's figures.
+- An npm project's steady state is well under the 600 MB baseline and does not grow
+  across five scans.
+- Loading is not repeated between scans, asserted rather than assumed.
+
+### Stage 6 — `match` package
 
 Ours, because we no longer use osv-scanner's matcher. Looks each extracted package up in
-the in-memory index from Stage 4 and decides whether it falls inside an advisory's
+the in-memory index from Stage 5 and decides whether it falls inside an advisory's
 affected ranges.
 
 The hard part is version semantics: npm semver, PEP 440, Go's scheme and Cargo all order
@@ -483,34 +509,34 @@ half-open ranges, `LastAffected`, explicit `Versions` lists, and the "0" sentine
   identical findings. This is the safety net for having taken matching in-house, and it
   is worth the awkwardness of keeping osv-scanner as a test-only dependency.
 
-### Stage 6 — `engine` package *(the concurrency stage)*
+### Stage 7 — `engine` package *(the concurrency stage)*
 
 The actor loop, debounce, coalescing, cancellation, publish-state tracking including **empty arrays to clear stale diagnostics**, deletion handling, and the idle-cheaply path. Tested entirely against a fake `Scanner` — no osv-scanner, no LSP.
 
 **Review:** `internal/engine/*.go`. This is the stage most likely to harbour subtle bugs and deserves the closest reading.
 **Gate:** `go test -race -count=100 ./internal/engine/...` clean. Explicit tests for: 40 rapid requests inside the 1 s window → exactly 1 scan; a new request cancels an in-flight scan and its results are never published; a deleted manifest gets an empty publish; `Close()` terminates every goroutine (`goleak`). Debounce tests use an injected clock, not `time.Sleep`.
 
-### Stage 7 — First real end-to-end
+### Stage 8 — First real end-to-end
 
 Wire stages 3–5 into the LSP layer. Severity mapping, `source`/`code`/`codeDescription`, file watchers, `didOpen` re-publish, **`$/progress` for DB download**. Ranges are full lines from `Inventory`. npm only.
 
 **Review:** `internal/lsp/diagnostics.go`, the wiring in `main.go`.
 **Gate:** open a real vulnerable npm project in Zed and see correct, correctly-positioned diagnostics; open one with no lockfile and see `FromRange` findings; first run shows download progress. First genuinely useful build.
 
-### Stage 8 — `locate` package (npm)
+### Stage 9 — `locate` package (npm)
 
 `package.json` → precise `(file, range)` pairs for declaration and version span, across `dependencies`/`devDependencies`/`optionalDependencies`/`peerDependencies`. Includes the byte-offset ↔ column helper for both encodings. Pure functions, golden-file tests.
 
 **Review:** `internal/locate/*.go` + golden files.
 **Gate:** golden tests pass including edge cases — nested scopes (`@scope/pkg`), duplicate names across sections, CRLF files, non-ASCII content. Diagnostics in Zed now underline the dependency name, not the whole line.
 
-### Stage 9 — Distribution
+### Stage 10 — Distribution
 
 Release workflow (six targets, `CGO_ENABLED=0`), asset naming contract, **`SHA256SUMS` published with every release**, shim switched to `github_release_by_tag_name` + `download_file` + **verify SHA-256** + `make_file_executable`, with `LanguageServerInstallationStatus::Failed` and a clear message when GitHub is unreachable. Cut `v0.0.1`.
 
 **Gate:** install from a clean machine with no Go toolchain and have it work; tamper one byte of the binary and confirm the shim refuses it. Doing this early means a broken distribution path surfaces now, not after six more stages of content.
 
-### Stage 10 — `graph` package (npm transitive, incl. workspaces)
+### Stage 11 — `graph` package (npm transitive, incl. workspaces)
 
 The largest piece of original work. `extractor.Package.ParentIDs` exists but is **not populated** by `packagelockjson` (confirmed), so npm resolution must be reconstructed: for a node at path *P* depending on *N*, walk *P*'s ancestors for `<ancestor>/node_modules/N`; BFS from each root recording the first hop. Falls back to the v1 nested tree.
 
@@ -521,19 +547,19 @@ The largest piece of original work. `extractor.Package.ParentIDs` exists but is 
 **Review:** `internal/graph/npmlock.go`.
 **Gate:** `npm-transitive` anchors a 3-deep chain on the correct `package.json` line with `relatedInformation` pointing at the lockfile; `npm-workspaces` anchors on `packages/api/package.json`, not root. Table-driven tests for hoisting, nested duplicates, cycles, and links.
 
-### Stage 11 — Go ecosystem
+### Stage 12 — Go ecosystem
 
 Near-free: `x/mod/modfile` gives exact positions, and since Go 1.17 every module is its own line in `go.mod`, so attribution is **identity** — no graph, no `go mod graph`.
 
 **Gate:** a Go fixture with a known-vulnerable indirect dependency shows a diagnostic on the right `go.mod` line.
 
-### Stage 12 — Python ecosystem
+### Stage 13 — Python ecosystem
 
 `requirements.txt` (free lines, `Plain Text` language; the extractor's lowest-version heuristic sets `FromRange`) → `pyproject.toml` locator → `poetry.lock`/`uv.lock` graphs. Confirm the `toolchain` caveat doesn't spawn extra server instances.
 
 **Gate:** all three Python fixtures produce correct anchors.
 
-### Stage 13 — Hover, code actions, suppression
+### Stage 14 — Hover, code actions, suppression
 
 Full advisory markdown on hover. Two code actions:
 - **Upgrade**: minimum-safe = max of `fixed` events across advisories hitting the package, compared with `osv-scalibr/semantic` (public; handles npm semver, PEP 440, Go, Cargo), rewritten preserving the operator (`^4.17.15` → `^4.17.21`). Direct deps with a same-file version span only.
@@ -557,7 +583,7 @@ So three actions fall out almost for free, mirroring JetBrains' `IgnoreReason`/`
 
 **Gate:** applying the upgrade in Zed produces a valid manifest and the diagnostic clears on rescan; applying ignore clears it and the toml is well-formed; an expired `ignoreUntil` brings the diagnostic back.
 
-### Stage 14 — Enrichment
+### Stage 15 — Enrichment
 
 **EPSS** (FIRST, daily CSV) and **CISA KEV** (1,711 actively-exploited CVEs). KEV promotes to Error; high EPSS promotes; unreachable or dev-only demotes. Both are small, cached, refreshed with the OSV DB, and preserve the offline property.
 
@@ -567,13 +593,13 @@ This is the differentiator: Package Checker shows CVSS alone. A CVSS 9.8 at EPSS
 
 **Gate:** a KEV-listed CVE renders as Error; the same CVE with KEV disabled renders per CVSS.
 
-### Stage 15 — Go reachability
+### Stage 16 — Go reachability
 
 Enable `reachability/go/source`; consume `GroupInfo.ExperimentalAnalysis[id].Called`; demote unreachable findings. Default **off** — it shells out to the Go toolchain and is slow. Requires `worktree.shell_env()` in the shim so `go` is on `PATH` under a GUI-launched Zed.
 
 **Gate:** a fixture importing a vulnerable module without calling the affected symbol produces a demoted diagnostic. Timed on a real repo before enabling by default anywhere.
 
-### Stage 16 — Hardening and publish
+### Stage 17 — Hardening and publish
 
 Wire up the full settings schema above end to end — shim forwards
 `initialization_options`, server validates and applies them, `didChangeConfiguration`
@@ -601,12 +627,12 @@ re-reads without a restart — plus README with **CC-BY 4.0 attribution for OSV/
 | ~~Zed's handling of diagnostics for closed buffers~~ | **Resolved Stage 1**: Zed *does* show diagnostics for never-opened files. `didOpen` re-publish is now defensive, not load-bearing |
 | Range heuristic false positives when the installed version is newer | Accepted for v1; installed-package scanning is the follow-up |
 | **We now own version-range matching** — per-ecosystem semantics are subtle | `deps.dev/util/semver`; differential-test `match` against osv-scanner's own results |
-| Database load footprint — 600 MB peak, growing across scans | Stage 4: ecosystem filter, streaming read, parse-once index; measured at the gate |
+| Database load footprint — 600 MB peak, growing across scans | Stage 4 fetches only the ecosystems present; Stage 5 streams and parses once, and measures the result |
 | npm's 205 MB download remains, since there is no published index | Background with progress; only JavaScript projects pay it |
 | `go.lsp.dev/protocol` is one tag after years dormant | Confined to `internal/lsp`; hand-written structs over `sourcegraph/jsonrpc2` is a one-package fallback |
-| Reachability cost on large repos | Stage 15, timed before defaulting on |
+| Reachability cost on large repos | Stage 16, timed before defaulting on |
 | Monorepo scan cost | User-facing `exclude` and `maxScanSeconds` settings; skip list is config-driven from Stage 3 |
-| Python `toolchain` in the server key may spawn extra instances | Stage 12 |
+| Python `toolchain` in the server key may spawn extra instances | Stage 13 |
 
 ## Not in scope for v1
 

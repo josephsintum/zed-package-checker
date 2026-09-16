@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -137,6 +138,29 @@ func finding(name, version string, score float64, path string, line int) model.F
 			}},
 		}},
 		Evidence: model.Site{Path: path, Range: model.WholeLine(line)},
+	}
+}
+
+func TestWatchedGlobsAndIsManifestAgree(t *testing.T) {
+	// These were two hand-maintained lists and had already diverged. The
+	// invariant that divergence breaks: every file the client is asked to
+	// watch must also be one didSave acts on, or whichever path was missed
+	// stops working with nothing to announce it.
+	globs := watchedGlobs()
+
+	for _, glob := range globs {
+		// Where the glob is a pattern rather than a name, this turns it into a
+		// concrete member; everywhere else it leaves the name alone.
+		base := strings.Replace(strings.TrimPrefix(glob, "**/"), "*", "-dev", 1)
+		if !isManifest("/proj/" + base) {
+			t.Errorf("watching %q, but isManifest(%q) is false", glob, base)
+		}
+	}
+
+	for _, name := range manifestNames {
+		if !slices.Contains(globs, "**/"+name) {
+			t.Errorf("isManifest accepts %q, but no watcher glob covers it", name)
+		}
 	}
 }
 

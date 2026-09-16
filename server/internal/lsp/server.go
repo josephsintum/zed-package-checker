@@ -26,17 +26,42 @@ import (
 // of every diagnostic this server publishes.
 const Name = "package-checker"
 
-// watchedGlobs are the files whose changes trigger a rescan.
+// manifestNames are files a change to which can alter what a project depends
+// on.
+//
+// The single source of truth for "is this a dependency manifest": the watcher
+// patterns are derived from it and isManifest tests against it. Kept that way
+// because the two were maintained separately and had already diverged — a
+// lockfile added to one and not the other silently disables either the watcher
+// or the didSave fallback, and nothing fails to announce it.
+var manifestNames = []string{
+	"package.json", "package-lock.json", "npm-shrinkwrap.json",
+	"yarn.lock", "pnpm-lock.yaml", "bun.lock",
+	"go.mod", "go.sum",
+	"pyproject.toml", "poetry.lock", "uv.lock",
+	"Cargo.toml", "Cargo.lock",
+}
+
+// The requirements.txt family — requirements.txt, requirements-dev.txt and the
+// rest — is a pattern rather than a fixed name, so it cannot live in
+// manifestNames and is spelled once here instead.
+const (
+	requirementsPrefix = "requirements"
+	requirementsSuffix = ".txt"
+)
+
+// watchedGlobs are the patterns whose matches trigger a rescan, derived from
+// manifestNames so the two cannot disagree.
 //
 // Source files are deliberately absent: what a project depends on changes when
 // a manifest or lockfile changes, and watching source would rescan on every
 // save for no benefit.
-var watchedGlobs = []string{
-	"**/package.json", "**/package-lock.json", "**/npm-shrinkwrap.json",
-	"**/yarn.lock", "**/pnpm-lock.yaml", "**/bun.lock",
-	"**/go.mod", "**/go.sum",
-	"**/pyproject.toml", "**/poetry.lock", "**/uv.lock", "**/requirements*.txt",
-	"**/Cargo.toml", "**/Cargo.lock",
+func watchedGlobs() []string {
+	globs := make([]string, 0, len(manifestNames)+1)
+	for _, name := range manifestNames {
+		globs = append(globs, "**/"+name)
+	}
+	return append(globs, "**/"+requirementsPrefix+"*"+requirementsSuffix)
 }
 
 // Scheduler is the scan scheduling this server drives, satisfied by
@@ -169,8 +194,9 @@ func (s *Server) Initialized(ctx context.Context, params *protocol.InitializedPa
 // Failure is not fatal: didSave still catches files the user edits, so the
 // server degrades to missing only changes made by tools outside the editor.
 func (s *Server) registerWatchers(ctx context.Context) {
-	watchers := make([]protocol.FileSystemWatcher, 0, len(watchedGlobs))
-	for _, glob := range watchedGlobs {
+	globs := watchedGlobs()
+	watchers := make([]protocol.FileSystemWatcher, 0, len(globs))
+	for _, glob := range globs {
 		watchers = append(watchers, protocol.FileSystemWatcher{
 			GlobPattern: protocol.Pattern(glob),
 		})
@@ -249,16 +275,6 @@ func (s *Server) Exit(ctx context.Context) error {
 	return nil
 }
 
-// manifestNames are files a change to which can alter what a project depends
-// on.
-var manifestNames = []string{
-	"package.json", "package-lock.json", "npm-shrinkwrap.json",
-	"yarn.lock", "pnpm-lock.yaml", "bun.lock",
-	"go.mod", "go.sum",
-	"pyproject.toml", "poetry.lock", "uv.lock",
-	"Cargo.toml", "Cargo.lock",
-}
-
 // isManifest reports whether a path is a dependency manifest or lockfile.
 func isManifest(path string) bool {
 	base := filepath.Base(path)
@@ -266,7 +282,7 @@ func isManifest(path string) bool {
 		return true
 	}
 	// requirements.txt, requirements-dev.txt, and the rest of the family.
-	return strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt")
+	return strings.HasPrefix(base, requirementsPrefix) && strings.HasSuffix(base, requirementsSuffix)
 }
 
 // toProtocolRange converts a model range, already zero-based in the negotiated

@@ -171,6 +171,9 @@ func (s *Server) publishSkeletonDiagnostic(ctx context.Context) error {
 
 // skipDirs are never descended into. They hold dependency trees and VCS data
 // whose manifests describe other people's packages, not this project's.
+//
+// Moves to internal/extract in Stage 3 and gains a user-facing "exclude"
+// setting that adds to it; see the Settings section in docs/PLAN.md.
 var skipDirs = map[string]bool{
 	"node_modules": true,
 	".git":         true,
@@ -183,12 +186,17 @@ var skipDirs = map[string]bool{
 
 // findManifests walks root and returns every file matching name.
 //
-// Unreadable directories are skipped rather than failing the walk: a single
-// permission error deep in a tree should not cost the user every other finding.
+// An error reading root itself is returned: the workspace being absent or
+// unreadable is a real problem worth surfacing. Errors deeper in the tree are
+// skipped instead, because one unreadable directory should not cost the user
+// every other finding.
 func findManifests(root, name string) ([]string, error) {
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if path == root {
+				return err
+			}
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}

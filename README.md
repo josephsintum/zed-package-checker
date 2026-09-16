@@ -62,14 +62,29 @@ only `dependencies` — not `devDependencies`, `optionalDependencies` or `peerDe
 `zipDB.load()` runs **on every scan**, not once per process. Measured on a
 one-dependency fixture against the real npm database:
 
-| | Wall time | Allocated |
-|---|---|---|
-| Scan 1 (incl. 205 MB download) | 11.2 s | 3.4 GB |
-| Scan 2 (same process, warm disk) | **4.5 s** | 3.1 GB |
+| | Wall time | Peak RSS | Total allocated |
+|---|---|---|---|
+| One scan, warm disk | 4.45 s | **600 MB** | 3.4 GB |
+| Two scans, same process | 8.72 s | **922 MB** | 6.5 GB |
+
+Peak RSS is `maximum resident set size` from the kernel; total allocated is Go's
+`TotalAlloc`, which is cumulative throughput and *not* a memory figure — reading
+it as one is an easy mistake to make.
+
+Two things matter here. The footprint is a sustained several hundred megabytes
+for the duration of a scan, in a process that stays resident as long as the
+editor does. And the high-water mark grows across scans in one process, which is
+either real retention or Go declining to return pages; the probe cannot tell
+which.
 
 The cost is fixed regardless of project size — it decompresses and `protojson.Unmarshal`s
-every advisory in the ecosystem (~100k for npm) and keeps the handful that match. A
-4.5 second, 3 GB scan on every file save is not viable for an editor.
+every advisory in the ecosystem (~100k for npm) and keeps the handful that match.
+
+Where the 600 MB goes is worth noting, because it suggests most of it is
+avoidable. `fetchZip` does `os.ReadFile` on the whole 205 MB archive and holds it
+for the duration, then reads entries out of that buffer. Opening the zip from
+disk instead, and streaming entries through, should remove the largest single
+term without changing anything else.
 
 ### The resolution: extract with scalibr, match ourselves
 

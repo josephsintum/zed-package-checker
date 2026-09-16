@@ -19,8 +19,12 @@ import (
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 
+	"github.com/josephsintum/zed-package-checker/server/internal/db"
+	"github.com/josephsintum/zed-package-checker/server/internal/engine"
 	"github.com/josephsintum/zed-package-checker/server/internal/extract"
 	"github.com/josephsintum/zed-package-checker/server/internal/lsp"
+	"github.com/josephsintum/zed-package-checker/server/internal/model"
+	"github.com/josephsintum/zed-package-checker/server/internal/scan"
 )
 
 // version is overridden at build time via
@@ -38,6 +42,7 @@ func run() error {
 	var (
 		showVersion = flag.Bool("version", false, "print version and exit")
 		logPath     = flag.String("log", "", "also write logs to this file")
+		debug       = flag.Bool("debug", false, "log at debug level")
 	)
 	flag.Bool("stdio", true, "communicate over stdio (default, accepted for compatibility)")
 	flag.Parse()
@@ -47,7 +52,7 @@ func run() error {
 		return nil
 	}
 
-	log, closeLog, err := newLogger(*logPath)
+	log, closeLog, err := newLogger(*logPath, *debug)
 	if err != nil {
 		return fmt.Errorf("configure logging: %w", err)
 	}
@@ -69,14 +74,40 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure extraction: %w", err)
 	}
+	database, err := db.New(log)
+	if err != nil {
+		return fmt.Errorf("configure the advisory database: %w", err)
+	}
 
-	// The server and the client handle are mutually dependent: NewServer needs
-	// the server to build the connection, and the server needs the resulting
-	// client to push diagnostics. Construct first, inject second.
-	srv := lsp.NewServer(log, version, extractor)
+	// The engine and the scanner refer to each other: the engine schedules
+	// scans, and a scan that finds the database missing needs to ask for a
+	// rescan once the download lands. The callback is set after both exist.
+	var eng *engine.Engine
+	scanner := scan.New(log, extractor, database, scan.OnDatabaseReady(func() {
+		eng.Request(engine.ReasonDatabaseSync)
+	}))
+
+	// The server is both the protocol endpoint and the publisher the engine
+	// writes through, so it is built before the engine and wired after.
+	var srv *lsp.Server
+	eng = engine.New(log, scanner, publisherFunc(func(ctx context.Context, path string, findings []model.Finding) error {
+		return srv.Publish(ctx, path, findings)
+	}))
+
+	defer func() { _ = eng.Close() }()
+
+	srv = lsp.NewServer(log, version, eng)
+
 	stream := jsonrpc2.NewStream(stdio{})
 	ctx, conn, client := protocol.NewServer(ctx, srv, stream)
 	srv.SetClient(client)
+
+	// Scheduling starts once the root is known, which happens in Initialize.
+	// Starting it here with an empty root would scan the wrong directory.
+	go func() {
+		<-srv.Ready()
+		eng.Start(ctx, srv.Root())
+	}()
 
 	<-conn.Done()
 
@@ -87,16 +118,24 @@ func run() error {
 	return nil
 }
 
+// publisherFunc adapts a function to engine.Publisher, so the server can be
+// constructed after the engine that writes through it.
+type publisherFunc func(ctx context.Context, path string, findings []model.Finding) error
+
+func (f publisherFunc) Publish(ctx context.Context, path string, findings []model.Finding) error {
+	return f(ctx, path, findings)
+}
+
 // newLogger builds a logger that never writes to stdout, plus a function to
 // release any file it opened.
 //
 // stdout carries the JSON-RPC stream; a single stray byte there corrupts the
 // protocol. Logs go to stderr, which Zed surfaces in its LSP log, and
 // optionally to a file as well for debugging.
-func newLogger(path string) (*slog.Logger, func(), error) {
+func newLogger(path string, debug bool) (*slog.Logger, func(), error) {
 	var (
-		out   io.Writer = os.Stderr
-		close           = func() {}
+		out       io.Writer = os.Stderr
+		closeFile           = func() {}
 	)
 	if path != "" {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -104,11 +143,13 @@ func newLogger(path string) (*slog.Logger, func(), error) {
 			return nil, nil, fmt.Errorf("open log file %s: %w", path, err)
 		}
 		out = io.MultiWriter(os.Stderr, f)
-		close = func() { _ = f.Close() }
+		closeFile = func() { _ = f.Close() }
 	}
-	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})), close, nil
+	level := slog.LevelInfo
+	if debug {
+		level = slog.LevelDebug
+	}
+	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: level})), closeFile, nil
 }
 
 // stdio adapts the process's standard streams to a single io.ReadWriteCloser

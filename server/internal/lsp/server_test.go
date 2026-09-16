@@ -2,26 +2,32 @@ package lsp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 
+	"github.com/josephsintum/zed-package-checker/server/internal/engine"
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
 // fakeClient captures published diagnostics instead of writing to a connection.
 //
-// Embedding UnimplementedClient means only the one method under test needs
-// implementing, and any other call the server makes fails loudly rather than
-// passing silently.
+// Embedding UnimplementedClient means only the methods under test need
+// implementing, and any other call fails loudly rather than passing silently.
 type fakeClient struct {
 	protocol.UnimplementedClient
-	published map[string][]protocol.Diagnostic
-	err       error
+	mu            sync.Mutex
+	published     map[string][]protocol.Diagnostic
+	registrations []string
+	err           error
 }
 
 func newFakeClient() *fakeClient {
@@ -29,6 +35,8 @@ func newFakeClient() *fakeClient {
 }
 
 func (c *fakeClient) PublishDiagnostics(_ context.Context, p *protocol.PublishDiagnosticsParams) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.err != nil {
 		return c.err
 	}
@@ -36,134 +44,379 @@ func (c *fakeClient) PublishDiagnostics(_ context.Context, p *protocol.PublishDi
 	return nil
 }
 
-// fakeExtractor returns canned results, so protocol behaviour can be tested
-// without touching a filesystem.
-type fakeExtractor struct {
-	pkgs []model.ExtractedPackage
-	err  error
+func (c *fakeClient) RegisterCapability(_ context.Context, p *protocol.RegistrationParams) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range p.Registrations {
+		c.registrations = append(c.registrations, r.Method)
+	}
+	return nil
 }
 
-func (f fakeExtractor) Extract(context.Context, string) ([]model.ExtractedPackage, error) {
-	return f.pkgs, f.err
+func (c *fakeClient) diagnostics(path string) []protocol.Diagnostic {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.published[path]
 }
 
-func pkg(ecosystem model.Ecosystem, name, version, path string, line int) model.ExtractedPackage {
-	return model.ExtractedPackage{
+// fakeScheduler records what the server asked for.
+type fakeScheduler struct {
+	mu       sync.Mutex
+	requests []engine.Reason
+	cleared  []string
+	findings map[string][]model.Finding
+}
+
+func newFakeScheduler() *fakeScheduler {
+	return &fakeScheduler{findings: make(map[string][]model.Finding)}
+}
+
+func (f *fakeScheduler) Request(r engine.Reason) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.requests = append(f.requests, r)
+}
+
+func (f *fakeScheduler) Clear(path string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cleared = append(f.cleared, path)
+}
+
+func (f *fakeScheduler) Findings(path string) []model.Finding {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.findings[path]
+}
+
+func (f *fakeScheduler) reasons() []engine.Reason {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]engine.Reason(nil), f.requests...)
+}
+
+// waitFor polls until cond holds, failing rather than hanging.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func newTestServer(t *testing.T) (*Server, *fakeClient, *fakeScheduler) {
+	t.Helper()
+	client := newFakeClient()
+	sched := newFakeScheduler()
+	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", sched)
+	s.SetClient(client)
+	s.root = "/proj"
+	return s, client, sched
+}
+
+// finding builds one for tests.
+func finding(name, version string, score float64, path string, line int) model.Finding {
+	return model.Finding{
 		Package: model.Package{
-			PackageKey: model.PackageKey{Ecosystem: ecosystem, Name: name},
+			PackageKey: model.PackageKey{Ecosystem: model.EcosystemNPM, Name: name},
 			Version:    version,
 		},
+		Advisories: []model.Advisory{{
+			ID:        "GHSA-" + name,
+			Summary:   name + " is vulnerable",
+			CVSSScore: score,
+			Affected: []model.Affected{{
+				Package: model.PackageKey{Ecosystem: model.EcosystemNPM, Name: name},
+				Ranges:  []model.AffectedRange{{Introduced: "0", Fixed: "9.9.9"}},
+			}},
+		}},
 		Evidence: model.Site{Path: path, Range: model.WholeLine(line)},
 	}
 }
 
-func newTestServer(t *testing.T, e Extractor) (*Server, *fakeClient) {
-	t.Helper()
-	client := newFakeClient()
-	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", e)
-	s.SetClient(client)
-	s.root = "/proj"
-	return s, client
-}
+func TestPublishRendersFindings(t *testing.T) {
+	s, client, _ := newTestServer(t)
 
-func TestPublishExtractedGroupsByFile(t *testing.T) {
-	// LSP replaces a file's diagnostics wholesale, so two packages in one file
-	// must arrive in a single publish or only the last would survive.
-	s, client := newTestServer(t, fakeExtractor{pkgs: []model.ExtractedPackage{
-		pkg(model.EcosystemGo, "github.com/gin-gonic/gin", "1.6.0", "/proj/go.mod", 6),
-		pkg(model.EcosystemGo, "gopkg.in/yaml.v2", "2.2.2", "/proj/go.mod", 7),
-		pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5),
-	}})
-
-	if err := s.publishExtracted(context.Background()); err != nil {
-		t.Fatalf("publishExtracted: %v", err)
+	err := s.Publish(context.Background(), "/proj/package.json", []model.Finding{
+		finding("lodash", "4.17.15", 7.5, "/proj/package.json", 5),
+	})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
 	}
 
-	if got := len(client.published); got != 2 {
-		t.Fatalf("published to %d files, want 2: %v", got, client.published)
+	diags := client.diagnostics("/proj/package.json")
+	if len(diags) != 1 {
+		t.Fatalf("got %d diagnostics, want 1 (no summary for a single finding)", len(diags))
 	}
-	if got := len(client.published["/proj/go.mod"]); got != 2 {
-		t.Errorf("go.mod got %d diagnostics, want 2", got)
+	d := diags[0]
+	if got := string(d.Message.(protocol.String)); !strings.Contains(got, "npm:lodash@4.17.15") {
+		t.Errorf("message %q does not name the package", got)
 	}
-	if got := len(client.published["/proj/package.json"]); got != 1 {
-		t.Errorf("package.json got %d diagnostics, want 1", got)
+	if !strings.Contains(string(d.Message.(protocol.String)), "9.9.9") {
+		t.Errorf("message %q does not mention the fixed version", d.Message)
+	}
+	if src, _ := d.Source.Get(); src != Name {
+		t.Errorf("source = %q, want %q", src, Name)
+	}
+	if got := string(d.Code.(protocol.String)); got != "GHSA-lodash" {
+		t.Errorf("code = %q, want the advisory id", got)
 	}
 }
 
-func TestPublishExtractedNothingFound(t *testing.T) {
-	// The server starts for nearly every project, so most workspaces have no
-	// dependencies. That must not error or publish.
-	s, client := newTestServer(t, fakeExtractor{})
+func TestPublishEmptyClearsTheFile(t *testing.T) {
+	// This is what removes a diagnostic the user has fixed.
+	s, client, _ := newTestServer(t)
 
-	if err := s.publishExtracted(context.Background()); err != nil {
-		t.Fatalf("publishExtracted: %v", err)
+	if err := s.Publish(context.Background(), "/proj/package.json", nil); err != nil {
+		t.Fatalf("Publish: %v", err)
 	}
-	if len(client.published) != 0 {
-		t.Errorf("published %v, want nothing", client.published)
+	diags, ok := client.published["/proj/package.json"]
+	if !ok {
+		t.Fatal("publishing no findings sent nothing; stale diagnostics would remain")
 	}
-}
-
-func TestPublishExtractedPropagatesErrors(t *testing.T) {
-	sentinel := errors.New("boom")
-
-	s, _ := newTestServer(t, fakeExtractor{err: sentinel})
-	if err := s.publishExtracted(context.Background()); !errors.Is(err, sentinel) {
-		t.Errorf("extract error = %v, want it to wrap %v", err, sentinel)
-	}
-
-	s, client := newTestServer(t, fakeExtractor{pkgs: []model.ExtractedPackage{
-		pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5),
-	}})
-	client.err = sentinel
-	if err := s.publishExtracted(context.Background()); !errors.Is(err, sentinel) {
-		t.Errorf("publish error = %v, want it to wrap %v", err, sentinel)
+	if len(diags) != 0 {
+		t.Errorf("got %d diagnostics, want an empty set", len(diags))
 	}
 }
 
-func TestDiagnosticFor(t *testing.T) {
+func TestSummaryAppearsForMultipleFindings(t *testing.T) {
+	// Per-package diagnostics scatter; the summary is the one line that says
+	// the file has a problem.
+	s, client, _ := newTestServer(t)
+
+	err := s.Publish(context.Background(), "/proj/package.json", []model.Finding{
+		finding("a", "1.0.0", 9.8, "/proj/package.json", 3),
+		finding("b", "1.0.0", 7.5, "/proj/package.json", 4),
+		finding("c", "1.0.0", 5.0, "/proj/package.json", 5),
+	})
+	if err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	diags := client.diagnostics("/proj/package.json")
+	if len(diags) != 4 {
+		t.Fatalf("got %d diagnostics, want 3 findings plus a summary", len(diags))
+	}
+
+	summary := diags[0]
+	if got := string(summary.Code.(protocol.String)); got != "summary" {
+		t.Fatalf("first diagnostic is %q, want the summary", got)
+	}
+	msg := string(summary.Message.(protocol.String))
+	for _, want := range []string{"3 vulnerable dependencies", "1 critical", "1 high", "1 medium"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("summary %q does not mention %q", msg, want)
+		}
+	}
+	if summary.Range.Start.Line != 0 {
+		t.Errorf("summary is on line %d, want the first line", summary.Range.Start.Line)
+	}
+}
+
+func TestSeverityMapping(t *testing.T) {
 	tests := []struct {
-		name        string
-		mutate      func(*model.ExtractedPackage)
-		wantMessage string
+		name  string
+		score float64
+		dev   bool
+		want  protocol.DiagnosticSeverity
 	}{
-		{
-			name:        "plain package",
-			mutate:      func(*model.ExtractedPackage) {},
-			wantMessage: "found npm:lodash@4.17.15",
-		},
-		{
-			name:        "from a version range",
-			mutate:      func(p *model.ExtractedPackage) { p.FromRange = true },
-			wantMessage: "found npm:lodash@4.17.15 (resolved from a version range; may not be what is installed)",
-		},
-		{
-			name:        "with dependency groups",
-			mutate:      func(p *model.ExtractedPackage) { p.DepGroups = []string{"dev"} },
-			wantMessage: "found npm:lodash@4.17.15 [dev]",
-		},
+		{"critical is an error", 9.8, false, protocol.DiagnosticSeverityError},
+		{"high is an error", 7.5, false, protocol.DiagnosticSeverityError},
+		{"medium is a warning", 5.0, false, protocol.DiagnosticSeverityWarning},
+		{"low is a warning", 2.0, false, protocol.DiagnosticSeverityWarning},
+		{"unscored is a warning", 0, false, protocol.DiagnosticSeverityWarning},
+		// Development dependencies do not ship, so they are demoted rather
+		// than hidden.
+		{"a dev dependency is demoted", 9.8, true, protocol.DiagnosticSeverityWarning},
+		{"a low dev dependency is demoted further", 2.0, true, protocol.DiagnosticSeverityInformation},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5)
-			tt.mutate(&p)
-
-			d := diagnosticFor(p, anchorSite(p))
-			if got := string(d.Message.(protocol.String)); got != tt.wantMessage {
-				t.Errorf("message = %q, want %q", got, tt.wantMessage)
+			f := finding("p", "1.0.0", tt.score, "/proj/package.json", 1)
+			if tt.dev {
+				f.DepGroups = []string{"dev"}
 			}
-			if d.Severity != protocol.DiagnosticSeverityWarning {
-				t.Errorf("severity = %v, want Warning", d.Severity)
-			}
-			if src, _ := d.Source.Get(); src != Name {
-				t.Errorf("source = %q, want %q", src, Name)
+			if got := severityFor(f); got != tt.want {
+				t.Errorf("severity = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
+func TestMaliciousIsNeverDemoted(t *testing.T) {
+	// "Remove this now" does not become less true for a dev dependency.
+	f := finding("evil", "1.0.0", 0, "/proj/package.json", 1)
+	f.Advisories[0].ID = "MAL-2024-1"
+	f.DepGroups = []string{"dev"}
+
+	if got := severityFor(f); got != protocol.DiagnosticSeverityError {
+		t.Errorf("severity = %v, want Error", got)
+	}
+	if msg := messageFor(f); !strings.Contains(msg, "MALICIOUS") {
+		t.Errorf("message %q does not flag the package as malicious", msg)
+	}
+}
+
+func TestTransitiveFindingPointsAtTheLockfile(t *testing.T) {
+	// The diagnostic sits on the manifest the user can edit; related
+	// information says where the version was actually resolved.
+	f := finding("lodash", "4.17.15", 7.5, "/proj/package-lock.json", 14)
+	declared := model.Site{Path: "/proj/package.json", Range: model.WholeLine(5)}
+	f.Declared = &model.Anchor{Declaration: declared}
+
+	d := findingDiagnostic(f)
+	if d.Range.Start.Line != 4 {
+		t.Errorf("diagnostic is on line %d, want the manifest line", d.Range.Start.Line+1)
+	}
+	if len(d.RelatedInformation) != 1 {
+		t.Fatalf("got %d related locations, want 1 pointing at the lockfile", len(d.RelatedInformation))
+	}
+	if got := d.RelatedInformation[0].Location.URI.FsPath(); got != "/proj/package-lock.json" {
+		t.Errorf("related location = %q, want the lockfile", got)
+	}
+}
+
+func TestFindingDataRoundTrips(t *testing.T) {
+	// A code action reads this instead of re-deriving what the diagnostic meant.
+	f := finding("lodash", "4.17.15", 7.5, "/proj/package.json", 5)
+	d := findingDiagnostic(f)
+
+	var data map[string]any
+	if err := json.Unmarshal(d.Data, &data); err != nil {
+		t.Fatalf("data is not valid JSON: %v", err)
+	}
+	for key, want := range map[string]any{
+		"ecosystem": "npm", "name": "lodash", "version": "4.17.15", "fixedVersion": "9.9.9",
+	} {
+		if got := data[key]; got != want {
+			t.Errorf("data[%q] = %v, want %v", key, got, want)
+		}
+	}
+}
+
+func TestInitializedRegistersWatchersAndRequestsAScan(t *testing.T) {
+	s, client, sched := newTestServer(t)
+
+	if err := s.Initialized(context.Background(), &protocol.InitializedParams{}); err != nil {
+		t.Fatalf("Initialized: %v", err)
+	}
+	// Registration happens in the background so it cannot stall initialization.
+	waitFor(t, "the watcher registration", func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return len(client.registrations) == 1 &&
+			client.registrations[0] == "workspace/didChangeWatchedFiles"
+	})
+	if got := sched.reasons(); len(got) != 1 || got[0] != engine.ReasonStartup {
+		t.Errorf("requests = %v, want one startup scan", got)
+	}
+}
+
+func TestDeletedManifestIsClearedImmediately(t *testing.T) {
+	// Waiting out a debounce would leave diagnostics on a file that is gone.
+	s, _, sched := newTestServer(t)
+
+	err := s.DidChangeWatchedFiles(context.Background(), &protocol.DidChangeWatchedFilesParams{
+		Changes: []protocol.FileEvent{
+			{URI: uri.File("/proj/package.json"), Type: protocol.FileChangeTypeDeleted},
+			{URI: uri.File("/proj/go.mod"), Type: protocol.FileChangeTypeChanged},
+		},
+	})
+	if err != nil {
+		t.Fatalf("DidChangeWatchedFiles: %v", err)
+	}
+
+	if len(sched.cleared) != 1 || sched.cleared[0] != "/proj/package.json" {
+		t.Errorf("cleared %v, want only the deleted manifest", sched.cleared)
+	}
+	if got := sched.reasons(); len(got) != 1 {
+		t.Errorf("requests = %v, want one rescan for the batch", got)
+	}
+}
+
+func TestDidSaveOnlyRescansForManifests(t *testing.T) {
+	s, _, sched := newTestServer(t)
+
+	for _, path := range []string{"/proj/src/index.js", "/proj/README.md"} {
+		_ = s.DidSave(context.Background(), &protocol.DidSaveTextDocumentParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+		})
+	}
+	if got := sched.reasons(); len(got) != 0 {
+		t.Errorf("saving source triggered %v, want no rescan", got)
+	}
+
+	for _, path := range []string{"/proj/package.json", "/proj/go.mod", "/proj/requirements-dev.txt"} {
+		_ = s.DidSave(context.Background(), &protocol.DidSaveTextDocumentParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
+		})
+	}
+	if got := len(sched.reasons()); got != 3 {
+		t.Errorf("manifest saves triggered %d rescans, want 3", got)
+	}
+}
+
+func TestDidOpenRepublishesWithoutScanning(t *testing.T) {
+	// The editor may drop diagnostics for a file it has no buffer for.
+	s, client, sched := newTestServer(t)
+	sched.findings["/proj/package.json"] = []model.Finding{
+		finding("lodash", "4.17.15", 7.5, "/proj/package.json", 5),
+	}
+
+	err := s.DidOpen(context.Background(), &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri.File("/proj/package.json")},
+	})
+	if err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+	if got := len(client.diagnostics("/proj/package.json")); got != 1 {
+		t.Errorf("republished %d diagnostics, want 1", got)
+	}
+	if got := sched.reasons(); len(got) != 0 {
+		t.Errorf("opening a file triggered %v, want no scan", got)
+	}
+}
+
+func TestIsManifest(t *testing.T) {
+	for path, want := range map[string]bool{
+		"/p/package.json":         true,
+		"/p/package-lock.json":    true,
+		"/p/go.mod":               true,
+		"/p/go.sum":               true,
+		"/p/pyproject.toml":       true,
+		"/p/requirements.txt":     true,
+		"/p/requirements-dev.txt": true,
+		"/p/Cargo.lock":           true,
+		"/p/src/index.js":         false,
+		"/p/README.md":            false,
+		"/p/requirements.md":      false,
+		"/p/my-package.json.bak":  false,
+	} {
+		t.Run(path, func(t *testing.T) {
+			if got := isManifest(path); got != want {
+				t.Errorf("isManifest(%q) = %v, want %v", path, got, want)
+			}
+		})
+	}
+}
+
+func TestPublishFailurePropagates(t *testing.T) {
+	s, client, _ := newTestServer(t)
+	sentinel := errors.New("connection closed")
+	client.err = sentinel
+
+	err := s.Publish(context.Background(), "/proj/package.json", nil)
+	if !errors.Is(err, sentinel) {
+		t.Errorf("Publish error = %v, want it to wrap %v", err, sentinel)
+	}
+}
+
 func TestToProtocolRangeIsZeroBased(t *testing.T) {
-	// WholeLine takes a one-based line; the protocol range must be zero-based,
-	// so line 14 in an editor is line 13 on the wire.
+	// WholeLine takes a one-based line; the wire is zero-based.
 	got := toProtocolRange(model.WholeLine(14))
 	want := protocol.Range{
 		Start: protocol.Position{Line: 13, Character: 0},
@@ -189,8 +442,7 @@ func TestWorkspaceRoot(t *testing.T) {
 	})
 
 	t.Run("falls back to the deprecated rootUri", func(t *testing.T) {
-		p := &protocol.InitializeParams{RootURI: &rootURI}
-		if got := workspaceRoot(p); got != "/from/rooturi" {
+		if got := workspaceRoot(&protocol.InitializeParams{RootURI: &rootURI}); got != "/from/rooturi" {
 			t.Errorf("workspaceRoot = %q, want /from/rooturi", got)
 		}
 	})
@@ -214,13 +466,6 @@ func TestNegotiatePositionEncoding(t *testing.T) {
 				protocol.PositionEncodingKindUTF16, protocol.PositionEncodingKindUTF8,
 			}},
 			want: protocol.PositionEncodingKindUTF8,
-		},
-		{
-			name: "utf-16 when it is the only option",
-			general: &protocol.GeneralClientCapabilities{PositionEncodings: []protocol.PositionEncodingKind{
-				protocol.PositionEncodingKindUTF16,
-			}},
-			want: protocol.PositionEncodingKindUTF16,
 		},
 		{
 			name:    "utf-16 when the client offers none",

@@ -10,11 +10,15 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
 
+	"github.com/josephsintum/zed-package-checker/server/internal/engine"
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
@@ -22,15 +26,25 @@ import (
 // of every diagnostic this server publishes.
 const Name = "package-checker"
 
-// projectURI is used as the advisory link until real findings carry their own.
-var projectURI = uri.MustParse("https://github.com/josephsintum/zed-package-checker")
-
-// Extractor discovers the dependencies under a project root.
+// watchedGlobs are the files whose changes trigger a rescan.
 //
-// Declared here rather than imported so the protocol layer depends only on
-// model types, and can be faked in tests without running a real scan.
-type Extractor interface {
-	Extract(ctx context.Context, root string) ([]model.ExtractedPackage, error)
+// Source files are deliberately absent: what a project depends on changes when
+// a manifest or lockfile changes, and watching source would rescan on every
+// save for no benefit.
+var watchedGlobs = []string{
+	"**/package.json", "**/package-lock.json", "**/npm-shrinkwrap.json",
+	"**/yarn.lock", "**/pnpm-lock.yaml", "**/bun.lock",
+	"**/go.mod", "**/go.sum",
+	"**/pyproject.toml", "**/poetry.lock", "**/uv.lock", "**/requirements*.txt",
+	"**/Cargo.toml", "**/Cargo.lock",
+}
+
+// Scheduler is the scan scheduling this server drives, satisfied by
+// engine.Engine.
+type Scheduler interface {
+	Request(reason engine.Reason)
+	Clear(path string)
+	Findings(path string) []model.Finding
 }
 
 // Server implements protocol.Server.
@@ -43,35 +57,62 @@ type Server struct {
 
 	log       *slog.Logger
 	version   string
-	extractor Extractor
+	scheduler Scheduler
 
 	// client is injected by SetClient once the JSON-RPC connection exists.
-	// It is nil between construction and that call, so it must not be used
-	// before Initialize.
 	client protocol.Client
 
 	// root is the workspace directory to scan, captured during Initialize.
 	root string
 
-	// posEncoding is the encoding negotiated during Initialize. Column offsets
-	// in published diagnostics must be expressed in these units.
+	// posEncoding is the encoding negotiated during Initialize.
 	posEncoding protocol.PositionEncodingKind
+
+	// ready closes once Initialize has set the root, so scheduling can start
+	// against the right directory rather than an empty one.
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
-// NewServer builds a Server that logs to log and reports itself as version.
+// NewServer builds a Server.
 //
 // The client is not available at construction time because protocol.NewServer
 // creates it from the server; call SetClient before serving.
-func NewServer(log *slog.Logger, version string, extractor Extractor) *Server {
-	return &Server{log: log, version: version, extractor: extractor}
+func NewServer(log *slog.Logger, version string, scheduler Scheduler) *Server {
+	return &Server{
+		log:       log,
+		version:   version,
+		scheduler: scheduler,
+		ready:     make(chan struct{}),
+	}
 }
 
-// SetClient injects the client handle used to push notifications such as
-// diagnostics. It must be called before the connection starts serving.
+// Ready closes once the workspace root is known.
+func (s *Server) Ready() <-chan struct{} { return s.ready }
+
+// SetClient injects the client handle used to push notifications.
 func (s *Server) SetClient(client protocol.Client) { s.client = client }
 
+// Root returns the workspace directory, known after Initialize.
+func (s *Server) Root() string { return s.root }
+
+// Publish delivers one file's findings, satisfying engine.Publisher.
+//
+// An empty slice is published rather than skipped: that is what clears
+// diagnostics for a file which is no longer affected.
+func (s *Server) Publish(ctx context.Context, path string, findings []model.Finding) error {
+	err := s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
+		URI:         uri.File(path),
+		Diagnostics: diagnosticsFor(path, findings),
+	})
+	if err != nil {
+		return fmt.Errorf("publish %s: %w", path, err)
+	}
+	return nil
+}
+
 // Initialize records the workspace root, negotiates a position encoding and
-// advertises the capabilities implemented so far.
+// advertises capabilities.
 func (s *Server) Initialize(ctx context.Context, params *protocol.InitializeParams) (*protocol.InitializeResult, error) {
 	s.root = workspaceRoot(params)
 	if s.root == "" {
@@ -81,8 +122,8 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 
 	s.log.Info("initialize",
 		"root", s.root,
-		"positionEncoding", string(s.posEncoding),
-	)
+		"positionEncoding", string(s.posEncoding))
+	s.readyOnce.Do(func() { close(s.ready) })
 
 	openClose := true
 	noChange := protocol.TextDocumentSyncKindNone
@@ -91,10 +132,9 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 	return &protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
 			PositionEncoding: s.posEncoding,
-			// Full sync is deliberately not requested. The checker reads
-			// manifests from disk and ignores dirty buffers, so it needs
-			// didOpen/didClose (to re-publish cached diagnostics) and didSave
-			// (to rescan), but never document contents.
+			// Manifests are read from disk, not from the buffer, so document
+			// contents are never needed: only open/close, to re-publish, and
+			// save, to rescan.
 			TextDocumentSync: &protocol.TextDocumentSyncOptions{
 				OpenClose: &openClose,
 				Change:    &noChange,
@@ -108,10 +148,82 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 	}, nil
 }
 
-// Initialized is sent once the client is ready to receive requests.
-// Diagnostics may only be published from this point onward.
+// Initialized registers file watchers and asks for the first scan.
+//
+// Registration is a request to the client, so it runs in the background: a
+// notification handler that blocks on a client round-trip stalls everything
+// behind it if the client is slow to answer, and nothing here depends on the
+// outcome.
 func (s *Server) Initialized(ctx context.Context, params *protocol.InitializedParams) error {
-	return s.publishExtracted(ctx)
+	go s.registerWatchers(context.WithoutCancel(ctx))
+	s.scheduler.Request(engine.ReasonStartup)
+	return nil
+}
+
+// registerWatchers asks the client to report manifest changes.
+//
+// Failure is not fatal: didSave still catches files the user edits, so the
+// server degrades to missing only changes made by tools outside the editor.
+func (s *Server) registerWatchers(ctx context.Context) {
+	watchers := make([]protocol.FileSystemWatcher, 0, len(watchedGlobs))
+	for _, glob := range watchedGlobs {
+		watchers = append(watchers, protocol.FileSystemWatcher{
+			GlobPattern: protocol.Pattern(glob),
+		})
+	}
+
+	// RegisterOptions is raw JSON, so the options are marshalled.
+	options := encodeData(protocol.DidChangeWatchedFilesRegistrationOptions{Watchers: watchers})
+
+	err := s.client.RegisterCapability(ctx, &protocol.RegistrationParams{
+		Registrations: []protocol.Registration{{
+			ID:              "package-checker-watch-manifests",
+			Method:          "workspace/didChangeWatchedFiles",
+			RegisterOptions: options,
+		}},
+	})
+	if err != nil {
+		s.log.Warn("could not register file watchers; "+
+			"changes made outside the editor will not trigger a rescan", "error", err)
+	}
+}
+
+// DidChangeWatchedFiles reacts to manifests changing on disk.
+func (s *Server) DidChangeWatchedFiles(ctx context.Context, params *protocol.DidChangeWatchedFilesParams) error {
+	for _, change := range params.Changes {
+		if change.Type == protocol.FileChangeTypeDeleted {
+			// Clear immediately rather than waiting out a debounce: a deleted
+			// manifest's diagnostics are wrong the moment it is gone.
+			s.scheduler.Clear(change.URI.FsPath())
+		}
+	}
+	if len(params.Changes) > 0 {
+		s.scheduler.Request(engine.ReasonFileChanged)
+	}
+	return nil
+}
+
+// DidSave rescans when a manifest is saved.
+//
+// Redundant with the file watchers when those work, and the fallback when they
+// do not: watcher support varies, particularly over SSH.
+func (s *Server) DidSave(ctx context.Context, params *protocol.DidSaveTextDocumentParams) error {
+	if isManifest(params.TextDocument.URI.FsPath()) {
+		s.scheduler.Request(engine.ReasonFileSaved)
+	}
+	return nil
+}
+
+// DidOpen re-publishes what is already known about a file.
+//
+// The editor may drop diagnostics for a file it has no buffer for, so opening
+// one has to restate them. Cheap, and never triggers a scan.
+func (s *Server) DidOpen(ctx context.Context, params *protocol.DidOpenTextDocumentParams) error {
+	path := params.TextDocument.URI.FsPath()
+	if findings := s.scheduler.Findings(path); len(findings) > 0 {
+		return s.Publish(ctx, path, findings)
+	}
+	return nil
 }
 
 // Shutdown is a no-op: the server holds no state that must be flushed.
@@ -127,79 +239,24 @@ func (s *Server) Exit(ctx context.Context) error {
 	return nil
 }
 
-// publishExtracted reports every dependency found in the workspace.
-//
-// These are informational, not findings: nothing has been matched against an
-// advisory database yet. They exist so the path from extraction to the editor
-// can be seen working before matching lands, and are replaced by real findings
-// once it does.
-func (s *Server) publishExtracted(ctx context.Context) error {
-	pkgs, err := s.extractor.Extract(ctx, s.root)
-	if err != nil {
-		return fmt.Errorf("extract %s: %w", s.root, err)
-	}
-	if len(pkgs) == 0 {
-		s.log.Info("no dependencies found", "root", s.root)
-		return nil
-	}
-
-	// Grouped per file: LSP replaces a file's diagnostics wholesale, so
-	// publishing per package would leave only the last one visible.
-	byFile := make(map[string][]protocol.Diagnostic)
-	for _, p := range pkgs {
-		site := anchorSite(p)
-		byFile[site.Path] = append(byFile[site.Path], diagnosticFor(p, site))
-	}
-
-	for path, diags := range byFile {
-		err := s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
-			URI:         uri.File(path),
-			Diagnostics: diags,
-		})
-		if err != nil {
-			return fmt.Errorf("publish diagnostics for %s: %w", path, err)
-		}
-	}
-
-	s.log.Info("published extracted dependencies",
-		"packages", len(pkgs), "files", len(byFile))
-	return nil
+// manifestNames are files a change to which can alter what a project depends
+// on.
+var manifestNames = []string{
+	"package.json", "package-lock.json", "npm-shrinkwrap.json",
+	"yarn.lock", "pnpm-lock.yaml", "bun.lock",
+	"go.mod", "go.sum",
+	"pyproject.toml", "poetry.lock", "uv.lock",
+	"Cargo.toml", "Cargo.lock",
 }
 
-// anchorSite picks where to report a package: the manifest the user can edit,
-// falling back to wherever the version was established.
-//
-// Without this the finding lands in a generated lockfile, which is both harder
-// to notice and not the line anyone would change.
-func anchorSite(p model.ExtractedPackage) model.Site {
-	if p.Declared != nil {
-		return *p.Declared
+// isManifest reports whether a path is a dependency manifest or lockfile.
+func isManifest(path string) bool {
+	base := filepath.Base(path)
+	if slices.Contains(manifestNames, base) {
+		return true
 	}
-	return p.Evidence
-}
-
-// diagnosticFor renders one extracted package as a diagnostic at site.
-func diagnosticFor(p model.ExtractedPackage, site model.Site) protocol.Diagnostic {
-	message := fmt.Sprintf("found %s", p.Package)
-	if p.FromRange {
-		message += " (resolved from a version range; may not be what is installed)"
-	}
-	if len(p.DepGroups) > 0 {
-		message += fmt.Sprintf(" %v", p.DepGroups)
-	}
-
-	return protocol.Diagnostic{
-		Range: toProtocolRange(site.Range),
-		// Warning rather than Information purely so these are visible while
-		// matching is being built: Zed's diagnostics panel lists errors and
-		// warnings, and silently omits anything below. Replaced by real
-		// severities derived from advisories once matching lands.
-		Severity:        protocol.DiagnosticSeverityWarning,
-		Source:          protocol.NewOptional(Name),
-		Code:            protocol.String("STAGE-3-EXTRACTED"),
-		CodeDescription: protocol.CodeDescription{Href: projectURI},
-		Message:         protocol.String(message),
-	}
+	// requirements.txt, requirements-dev.txt, and the rest of the family.
+	return strings.HasPrefix(base, "requirements") && strings.HasSuffix(base, ".txt")
 }
 
 // toProtocolRange converts a model range, already zero-based in the negotiated
@@ -238,7 +295,7 @@ func workspaceRoot(params *protocol.InitializeParams) string {
 //
 // UTF-8 is preferred because manifest parsing produces byte offsets already;
 // anything else requires converting every column. UTF-16 is the protocol
-// default and the guaranteed fallback when the client expresses no preference.
+// default and the guaranteed fallback.
 func negotiatePositionEncoding(params *protocol.InitializeParams) protocol.PositionEncodingKind {
 	// General is optional and absent from minimal clients, so it must not be
 	// dereferenced blindly during initialize.

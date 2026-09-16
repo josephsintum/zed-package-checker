@@ -246,7 +246,13 @@ func workspaceRoot(params *protocol.InitializeParams) string {
 // anything else requires converting every column. UTF-16 is the protocol
 // default and the guaranteed fallback when the client expresses no preference.
 func negotiatePositionEncoding(params *protocol.InitializeParams) protocol.PositionEncodingKind {
-	if slices.Contains(params.Capabilities.General.PositionEncodings, protocol.PositionEncodingKindUTF8) {
+	// General is optional and absent from minimal clients, so it must not be
+	// dereferenced blindly during initialize.
+	general := params.Capabilities.General
+	if general == nil {
+		return protocol.PositionEncodingKindUTF16
+	}
+	if slices.Contains(general.PositionEncodings, protocol.PositionEncodingKindUTF8) {
 		return protocol.PositionEncodingKindUTF8
 	}
 	return protocol.PositionEncodingKindUTF16

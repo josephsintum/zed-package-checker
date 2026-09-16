@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"slices"
 	"testing"
+
+	"go.lsp.dev/protocol"
 )
 
 // writeTree creates files under root. Keys are slash-separated relative paths;
@@ -171,5 +173,13 @@ func TestFindManifestsSkipsUnreadableDirectories(t *testing.T) {
 	}
 	if want := []string{"readable/package.json"}; !slices.Equal(relative(t, root, got), want) {
 		t.Errorf("findManifests() = %v, want %v", relative(t, root, got), want)
+	}
+}
+
+func TestNegotiatePositionEncodingWithoutGeneralCapabilities(t *testing.T) {
+	// "general" is optional in the protocol and a minimal client may omit it.
+	// Dereferencing it would crash the server during initialize.
+	if got := negotiatePositionEncoding(&protocol.InitializeParams{}); got != protocol.PositionEncodingKindUTF16 {
+		t.Errorf("negotiatePositionEncoding = %q, want utf-16", got)
 	}
 }

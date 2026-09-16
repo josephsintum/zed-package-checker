@@ -16,9 +16,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"go.lsp.dev/jsonrpc2"
-	"go.lsp.dev/protocol"
-
 	"github.com/josephsintum/zed-package-checker/server/internal/db"
 	"github.com/josephsintum/zed-package-checker/server/internal/engine"
 	"github.com/josephsintum/zed-package-checker/server/internal/extract"
@@ -74,7 +71,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("configure extraction: %w", err)
 	}
-	database, err := db.New(log)
+	// The progress reporter needs no wiring to the server: it finds the client
+	// on the request context, so it can be built before either exists.
+	database, err := db.New(log, db.WithProgress(lsp.NewDownloadProgress(log)))
 	if err != nil {
 		return fmt.Errorf("configure the advisory database: %w", err)
 	}
@@ -94,15 +93,18 @@ func run() error {
 		return srv.Publish(ctx, path, findings)
 	}))
 
+	// Deferred calls unwind in reverse, so this pair closes the engine first:
+	// it stops scheduling scans, leaving the scanner idle by the time it is
+	// asked to abandon any download still running.
+	defer func() { _ = scanner.Close() }()
 	defer func() { _ = eng.Close() }()
 
 	srv = lsp.NewServer(log, version, eng)
 
-	// NewServer starts dispatching before it returns, so nothing may be handed
-	// to the server after this line. The client it builds rides on the returned
-	// context, which is what every handler and the engine's publisher receive.
-	stream := jsonrpc2.NewStream(stdio{})
-	ctx, conn, _ := protocol.NewServer(ctx, srv, stream)
+	// Dispatch starts inside Serve, so nothing may be handed to the server
+	// after this line. The client rides on the returned context, which is what
+	// every handler and the engine's publisher receive.
+	ctx, conn := lsp.Serve(ctx, srv, stdio{})
 
 	// Scheduling starts once the root is known, which happens in Initialize.
 	// Starting it here with an empty root would scan the wrong directory.

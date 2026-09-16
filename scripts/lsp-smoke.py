@@ -16,9 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import select
 import subprocess
 import sys
 import threading
+import time
 
 DEFAULT_BINARY = "server/dist/package-checker-lsp"
 
@@ -27,6 +29,11 @@ def frame(payload: dict) -> bytes:
     """Encode one JSON-RPC message with LSP's Content-Length framing."""
     body = json.dumps(payload).encode()
     return b"Content-Length: %d\r\n\r\n%s" % (len(body), body)
+
+
+def readable(stream, timeout: float) -> bool:
+    """Report whether stream has data, so a quiet server does not hang us."""
+    return bool(select.select([stream], [], [], timeout)[0])
 
 
 def read_message(stream) -> dict | None:
@@ -51,6 +58,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=DEFAULT_BINARY)
     ap.add_argument("--root", default="server/testdata/fixtures/npm-direct")
+    ap.add_argument("--timeout", type=float, default=120.0,
+                    help="seconds to wait for diagnostics")
+    ap.add_argument("--expect", type=int, default=1,
+                    help="stop after this many publishes")
     args = ap.parse_args()
 
     root = pathlib.Path(args.root).resolve()
@@ -101,14 +112,28 @@ def main() -> int:
     proc.stdin.flush()
 
     # Collect notifications until diagnostics arrive or the server goes quiet.
+    #
+    # Server-to-client requests must be answered: the server registers file
+    # watchers this way, and a real client always replies. Ignoring them wedges
+    # anything the server does afterwards.
     published = []
-    for _ in range(10):
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        if not readable(proc.stdout, 0.5):
+            if published:
+                break  # the server has gone quiet and we have what we came for
+            continue
         msg = read_message(proc.stdout)
         if msg is None:
             break
+        if "id" in msg and "method" in msg:
+            proc.stdin.write(frame({"jsonrpc": "2.0", "id": msg["id"], "result": None}))
+            proc.stdin.flush()
+            continue
         if msg.get("method") == "textDocument/publishDiagnostics":
             published.append(msg["params"])
-            break
+            if len(published) >= args.expect:
+                break
 
     proc.stdin.write(frame({"jsonrpc": "2.0", "id": 2, "method": "shutdown"}))
     proc.stdin.flush()

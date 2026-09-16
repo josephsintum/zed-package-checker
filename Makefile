@@ -7,7 +7,7 @@ VERSION    ?= dev
 
 GO_LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all server harness dbcheck extension test test-race test-differential lint fmt tidy clean help
+.PHONY: all server harness dbcheck scanharness extension test test-race test-differential lint fmt tidy clean help
 
 all: server extension ## Build both halves
 
@@ -23,6 +23,10 @@ harness: ## Build the extraction harness (development only)
 dbcheck: ## Build the database checker (development only)
 	cd $(SERVER_DIR) && go build -o dist/dbcheck ./cmd/dbcheck
 	@echo "built $(DIST)/dbcheck"
+
+scanharness: ## Build the phase-by-phase scan timer (development only)
+	cd $(SERVER_DIR) && go build -o dist/scanharness ./cmd/scanharness
+	@echo "built $(DIST)/scanharness"
 
 extension: ## Build the Zed extension shim to wasm
 	cargo build --release --target wasm32-wasip1

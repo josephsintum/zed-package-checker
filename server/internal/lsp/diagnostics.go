@@ -60,9 +60,9 @@ func findingDiagnostic(f model.Finding) protocol.Diagnostic {
 // summaryDiagnostic gives a file one line saying how much is wrong with it.
 //
 // Per-package diagnostics scatter across files the user may not have open, so
-// nothing otherwise says "this project has a problem" in one place. Anchored on
-// the first finding's file rather than a fixed line, because a manifest's
-// structure varies and guessing wrong puts it somewhere meaningless.
+// nothing otherwise says "this project has a problem" in one place. It is
+// anchored on the declaration the manifest must contain rather than on line 1;
+// see summaryAnchorLine.
 func summaryDiagnostic(path string, findings []model.Finding) (protocol.Diagnostic, bool) {
 	if len(findings) < 2 {
 		// One finding is its own summary.
@@ -102,9 +102,7 @@ func summaryDiagnostic(path string, findings []model.Finding) (protocol.Diagnost
 	}
 
 	return protocol.Diagnostic{
-		// On the summary's own file, at the top: every manifest has a first
-		// line, and it is where a reader looks for a file-level statement.
-		Range:    toProtocolRange(model.WholeLine(1)),
+		Range:    toProtocolRange(model.WholeLine(summaryAnchorLine(path))),
 		Severity: severityLevel(worst, false, nil),
 		Source:   protocol.NewOptional(Name),
 		Code:     protocol.String("summary"),

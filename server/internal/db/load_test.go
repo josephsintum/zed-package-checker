@@ -301,6 +301,75 @@ func TestLoadWithoutAnArchiveIsNotReady(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsAnArchiveNothingCanBeDecodedFrom(t *testing.T) {
+	// A zip that opens but whose entries are all garbage passes the zip
+	// validation heal() does, so nothing upstream catches it. Loading it as a
+	// successful empty index would report every project clean.
+	srv := newArchiveServer(t, nil)
+	d := newTestDB(t, srv)
+
+	seedArchive(t, d, model.EcosystemNPM, map[string]string{
+		"GHSA-1.json": "{ this is not json",
+		"GHSA-2.json": "]]]",
+	})
+
+	_, err := d.Load(context.Background(), []model.Ecosystem{model.EcosystemNPM})
+	if !errors.Is(err, ErrNotReady) {
+		t.Errorf("Load of an undecodable archive returned %v, want ErrNotReady", err)
+	}
+}
+
+func TestLoadKeepsGoingWhenOneAdvisoryIsUnreadable(t *testing.T) {
+	// The opposite of the above: some entries decode, so the archive is intact
+	// and the readable advisories are still worth having.
+	srv := newArchiveServer(t, nil)
+	d := newTestDB(t, srv)
+
+	seedArchive(t, d, model.EcosystemNPM, map[string]string{
+		"GHSA-broken.json": "{ not json",
+		"GHSA-ok.json": advisoryJSON(t, map[string]any{
+			"id": "GHSA-ok",
+			"affected": []any{map[string]any{
+				"package": map[string]any{"ecosystem": "npm", "name": "lodash"},
+			}},
+		}),
+	})
+
+	idx, err := d.Load(context.Background(), []model.Ecosystem{model.EcosystemNPM})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := idx.Advisories(); got != 1 {
+		t.Errorf("indexed %d advisories, want 1 (the readable one)", got)
+	}
+}
+
+func TestLoadAcceptsAnArchiveThatDecodesButIndexesNothing(t *testing.T) {
+	// Withdrawn advisories are about 4% of a real archive. An archive of
+	// nothing but withdrawn entries decodes cleanly and indexes nothing, and
+	// that is not corruption — it must not be confused with the case above.
+	srv := newArchiveServer(t, nil)
+	d := newTestDB(t, srv)
+
+	seedArchive(t, d, model.EcosystemNPM, map[string]string{
+		"GHSA-withdrawn.json": advisoryJSON(t, map[string]any{
+			"id":        "GHSA-withdrawn",
+			"withdrawn": "2023-01-01T00:00:00Z",
+			"affected": []any{map[string]any{
+				"package": map[string]any{"ecosystem": "npm", "name": "lodash"},
+			}},
+		}),
+	})
+
+	idx, err := d.Load(context.Background(), []model.Ecosystem{model.EcosystemNPM})
+	if err != nil {
+		t.Fatalf("Load of an all-withdrawn archive: %v", err)
+	}
+	if got := idx.Advisories(); got != 0 {
+		t.Errorf("indexed %d advisories, want 0", got)
+	}
+}
+
 func TestLoadHonoursCancellation(t *testing.T) {
 	srv := newArchiveServer(t, nil)
 	d := newTestDB(t, srv)

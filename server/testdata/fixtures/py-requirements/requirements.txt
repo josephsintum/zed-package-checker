@@ -1,0 +1,4 @@
+# a pinned dependency
+requests==2.19.1
+# a range, resolved to its lowest satisfying version
+urllib3>=1.24

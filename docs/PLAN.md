@@ -488,11 +488,19 @@ remedy was necessary or merely tidy.
   across five scans.
 - Loading is not repeated between scans, asserted rather than assumed.
 
-### Stage 6 — `match` package
+### Stage 6 — `match` package — **DONE**
 
-Ours, because we no longer use osv-scanner's matcher. Looks each extracted package up in
-the in-memory index from Stage 5 and decides whether it falls inside an advisory's
-affected ranges.
+Only the range arithmetic is ours; version ordering comes from `osv-scalibr/semantic`,
+the same package osv-scanner uses.
+
+osv-scanner's own matcher is not reused because its database cache is filtered to the
+package names present when it first loaded, and later calls get that stale set regardless
+of what the project now depends on. Correct for a CLI that runs once; for a server that
+rescans after every `npm install` it would silently miss advisories for newly added
+dependencies. Caching it ourselves, keyed on the dependency-name set, was considered and
+rejected: it trades ~240 lines of ours for an invalidation rule whose correctness depends
+on an unexported implementation detail, and whose failure mode is a silent false
+negative.
 
 The hard part is version semantics: npm semver, PEP 440, Go's scheme and Cargo all order
 versions differently, and `1.0.0-beta` sorting before `1.0.0` is the sort of detail that

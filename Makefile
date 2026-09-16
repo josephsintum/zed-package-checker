@@ -7,7 +7,7 @@ VERSION    ?= dev
 
 GO_LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all server harness dbcheck extension test lint fmt tidy clean help
+.PHONY: all server harness dbcheck extension test test-differential lint fmt tidy clean help
 
 all: server extension ## Build both halves
 
@@ -29,6 +29,10 @@ extension: ## Build the Zed extension shim to wasm
 
 test: ## Run Go tests with the race detector
 	cd $(SERVER_DIR) && go test -race ./...
+
+test-differential: dbcheck ## Check our matching against osv-scanner (needs the advisory cache)
+	cd $(SERVER_DIR) && ./dist/dbcheck -runs 1 npm Go PyPI
+	cd $(SERVER_DIR) && go test -tags differential -run TestMatchesOSVScanner -v ./internal/match/
 
 lint: ## Vet the Go module (golangci-lint if available)
 	cd $(SERVER_DIR) && go vet ./...

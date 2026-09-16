@@ -1,185 +1,247 @@
 package lsp
 
 import (
-	"os"
-	"path/filepath"
-	"runtime"
-	"slices"
+	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"testing"
 
 	"go.lsp.dev/protocol"
+	"go.lsp.dev/uri"
+
+	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
-// writeTree creates files under root. Keys are slash-separated relative paths;
-// parent directories are created as needed.
-func writeTree(t *testing.T, root string, files map[string]string) {
-	t.Helper()
-	for rel, content := range files {
-		path := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir for %s: %v", rel, err)
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			t.Fatalf("write %s: %v", rel, err)
-		}
+// fakeClient captures published diagnostics instead of writing to a connection.
+//
+// Embedding UnimplementedClient means only the one method under test needs
+// implementing, and any other call the server makes fails loudly rather than
+// passing silently.
+type fakeClient struct {
+	protocol.UnimplementedClient
+	published map[string][]protocol.Diagnostic
+	err       error
+}
+
+func newFakeClient() *fakeClient {
+	return &fakeClient{published: make(map[string][]protocol.Diagnostic)}
+}
+
+func (c *fakeClient) PublishDiagnostics(_ context.Context, p *protocol.PublishDiagnosticsParams) error {
+	if c.err != nil {
+		return c.err
+	}
+	c.published[p.URI.FsPath()] = p.Diagnostics
+	return nil
+}
+
+// fakeExtractor returns canned results, so protocol behaviour can be tested
+// without touching a filesystem.
+type fakeExtractor struct {
+	pkgs []model.ExtractedPackage
+	err  error
+}
+
+func (f fakeExtractor) Extract(context.Context, string) ([]model.ExtractedPackage, error) {
+	return f.pkgs, f.err
+}
+
+func pkg(ecosystem model.Ecosystem, name, version, path string, line int) model.ExtractedPackage {
+	return model.ExtractedPackage{
+		Package: model.Package{
+			PackageKey: model.PackageKey{Ecosystem: ecosystem, Name: name},
+			Version:    version,
+		},
+		Evidence: model.Site{Path: path, Range: model.WholeLine(line)},
 	}
 }
 
-// relative converts absolute results back to slash-separated paths relative to
-// root, so assertions stay readable and platform independent.
-func relative(t *testing.T, root string, paths []string) []string {
+func newTestServer(t *testing.T, e Extractor) (*Server, *fakeClient) {
 	t.Helper()
-	out := make([]string, 0, len(paths))
-	for _, p := range paths {
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			t.Fatalf("rel %s: %v", p, err)
-		}
-		out = append(out, filepath.ToSlash(rel))
-	}
-	slices.Sort(out)
-	return out
+	client := newFakeClient()
+	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", e)
+	s.SetClient(client)
+	s.root = "/proj"
+	return s, client
 }
 
-func TestFindManifests(t *testing.T) {
+func TestPublishExtractedGroupsByFile(t *testing.T) {
+	// LSP replaces a file's diagnostics wholesale, so two packages in one file
+	// must arrive in a single publish or only the last would survive.
+	s, client := newTestServer(t, fakeExtractor{pkgs: []model.ExtractedPackage{
+		pkg(model.EcosystemGo, "github.com/gin-gonic/gin", "1.6.0", "/proj/go.mod", 6),
+		pkg(model.EcosystemGo, "gopkg.in/yaml.v2", "2.2.2", "/proj/go.mod", 7),
+		pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5),
+	}})
+
+	if err := s.publishExtracted(context.Background()); err != nil {
+		t.Fatalf("publishExtracted: %v", err)
+	}
+
+	if got := len(client.published); got != 2 {
+		t.Fatalf("published to %d files, want 2: %v", got, client.published)
+	}
+	if got := len(client.published["/proj/go.mod"]); got != 2 {
+		t.Errorf("go.mod got %d diagnostics, want 2", got)
+	}
+	if got := len(client.published["/proj/package.json"]); got != 1 {
+		t.Errorf("package.json got %d diagnostics, want 1", got)
+	}
+}
+
+func TestPublishExtractedNothingFound(t *testing.T) {
+	// The server starts for nearly every project, so most workspaces have no
+	// dependencies. That must not error or publish.
+	s, client := newTestServer(t, fakeExtractor{})
+
+	if err := s.publishExtracted(context.Background()); err != nil {
+		t.Fatalf("publishExtracted: %v", err)
+	}
+	if len(client.published) != 0 {
+		t.Errorf("published %v, want nothing", client.published)
+	}
+}
+
+func TestPublishExtractedPropagatesErrors(t *testing.T) {
+	sentinel := errors.New("boom")
+
+	s, _ := newTestServer(t, fakeExtractor{err: sentinel})
+	if err := s.publishExtracted(context.Background()); !errors.Is(err, sentinel) {
+		t.Errorf("extract error = %v, want it to wrap %v", err, sentinel)
+	}
+
+	s, client := newTestServer(t, fakeExtractor{pkgs: []model.ExtractedPackage{
+		pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5),
+	}})
+	client.err = sentinel
+	if err := s.publishExtracted(context.Background()); !errors.Is(err, sentinel) {
+		t.Errorf("publish error = %v, want it to wrap %v", err, sentinel)
+	}
+}
+
+func TestDiagnosticFor(t *testing.T) {
 	tests := []struct {
-		name  string
-		files map[string]string
-		want  []string
+		name        string
+		mutate      func(*model.ExtractedPackage)
+		wantMessage string
 	}{
 		{
-			name:  "no manifests",
-			files: map[string]string{"README.md": "", "src/index.js": ""},
-			want:  []string{},
+			name:        "plain package",
+			mutate:      func(*model.ExtractedPackage) {},
+			wantMessage: "found npm:lodash@4.17.15",
 		},
 		{
-			name:  "manifest at the root",
-			files: map[string]string{"package.json": "{}"},
-			want:  []string{"package.json"},
+			name:        "from a version range",
+			mutate:      func(p *model.ExtractedPackage) { p.FromRange = true },
+			wantMessage: "found npm:lodash@4.17.15 (resolved from a version range; may not be what is installed)",
 		},
 		{
-			name: "manifests nested several levels down",
-			files: map[string]string{
-				"a/package.json":        "{}",
-				"a/b/c/package.json":    "{}",
-				"unrelated/notes.txt":   "",
-				"a/b/c/package-lock.js": "",
-			},
-			want: []string{"a/b/c/package.json", "a/package.json"},
-		},
-		{
-			name: "node_modules is skipped",
-			files: map[string]string{
-				"package.json":                        "{}",
-				"node_modules/lodash/package.json":    "{}",
-				"a/node_modules/express/package.json": "{}",
-			},
-			want: []string{"package.json"},
-		},
-		{
-			name: "vcs and build directories are skipped",
-			files: map[string]string{
-				"package.json":        "{}",
-				".git/package.json":   "{}",
-				"target/package.json": "{}",
-				"dist/package.json":   "{}",
-				"vendor/package.json": "{}",
-				".venv/package.json":  "{}",
-			},
-			want: []string{"package.json"},
-		},
-		{
-			name: "hidden directories are skipped",
-			files: map[string]string{
-				"package.json":         "{}",
-				".cache/package.json":  "{}",
-				".github/package.json": "{}",
-			},
-			want: []string{"package.json"},
-		},
-		{
-			name: "a directory named like the manifest is not a match",
-			files: map[string]string{
-				"package.json/placeholder": "",
-				"real/package.json":        "{}",
-			},
-			want: []string{"real/package.json"},
+			name:        "with dependency groups",
+			mutate:      func(p *model.ExtractedPackage) { p.DepGroups = []string{"dev"} },
+			wantMessage: "found npm:lodash@4.17.15 [dev]",
 		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeTree(t, root, tt.files)
+			p := pkg(model.EcosystemNPM, "lodash", "4.17.15", "/proj/package.json", 5)
+			tt.mutate(&p)
 
-			got, err := findManifests(root, "package.json")
-			if err != nil {
-				t.Fatalf("findManifests: %v", err)
+			d := diagnosticFor(p, anchorSite(p))
+			if got := string(d.Message.(protocol.String)); got != tt.wantMessage {
+				t.Errorf("message = %q, want %q", got, tt.wantMessage)
 			}
-			if diff := relative(t, root, got); !slices.Equal(diff, tt.want) {
-				t.Errorf("findManifests() = %v, want %v", diff, tt.want)
+			if d.Severity != protocol.DiagnosticSeverityWarning {
+				t.Errorf("severity = %v, want Warning", d.Severity)
+			}
+			if src, _ := d.Source.Get(); src != Name {
+				t.Errorf("source = %q, want %q", src, Name)
 			}
 		})
 	}
 }
 
-func TestFindManifestsRootItselfHiddenIsStillScanned(t *testing.T) {
-	// The skip rules must not apply to the root. A user whose project lives in
-	// a dotted directory still expects it scanned.
-	parent := t.TempDir()
-	root := filepath.Join(parent, ".config")
-	writeTree(t, parent, map[string]string{".config/package.json": "{}"})
-
-	got, err := findManifests(root, "package.json")
-	if err != nil {
-		t.Fatalf("findManifests: %v", err)
+func TestToProtocolRangeIsZeroBased(t *testing.T) {
+	// WholeLine takes a one-based line; the protocol range must be zero-based,
+	// so line 14 in an editor is line 13 on the wire.
+	got := toProtocolRange(model.WholeLine(14))
+	want := protocol.Range{
+		Start: protocol.Position{Line: 13, Character: 0},
+		End:   protocol.Position{Line: 14, Character: 0},
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %v, want the manifest inside the dotted root", got)
+	if got != want {
+		t.Errorf("toProtocolRange = %+v, want %+v", got, want)
 	}
 }
 
-func TestFindManifestsMissingRoot(t *testing.T) {
-	// A root that does not exist is a real error, unlike an unreadable
-	// subdirectory encountered mid-walk.
-	if _, err := findManifests(filepath.Join(t.TempDir(), "absent"), "package.json"); err == nil {
-		t.Error("expected an error for a missing root")
-	}
-}
+func TestWorkspaceRoot(t *testing.T) {
+	folderURI := uri.File("/from/folder")
+	rootURI := uri.File("/from/rooturi")
 
-func TestFindManifestsSkipsUnreadableDirectories(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory permissions behave differently on Windows")
-	}
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores directory permissions")
-	}
-
-	// One unreadable directory must not cost the caller every other finding.
-	root := t.TempDir()
-	writeTree(t, root, map[string]string{
-		"readable/package.json": "{}",
-		"locked/package.json":   "{}",
+	t.Run("prefers workspace folders", func(t *testing.T) {
+		p := &protocol.InitializeParams{
+			WorkspaceFolders: protocol.NewNullable([]protocol.WorkspaceFolder{{URI: folderURI}}),
+			RootURI:          &rootURI,
+		}
+		if got := workspaceRoot(p); got != "/from/folder" {
+			t.Errorf("workspaceRoot = %q, want /from/folder", got)
+		}
 	})
-	locked := filepath.Join(root, "locked")
-	if err := os.Chmod(locked, 0o000); err != nil {
-		t.Fatalf("chmod: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
 
-	got, err := findManifests(root, "package.json")
-	if err != nil {
-		t.Fatalf("findManifests should not fail on an unreadable directory: %v", err)
-	}
-	if want := []string{"readable/package.json"}; !slices.Equal(relative(t, root, got), want) {
-		t.Errorf("findManifests() = %v, want %v", relative(t, root, got), want)
-	}
+	t.Run("falls back to the deprecated rootUri", func(t *testing.T) {
+		p := &protocol.InitializeParams{RootURI: &rootURI}
+		if got := workspaceRoot(p); got != "/from/rooturi" {
+			t.Errorf("workspaceRoot = %q, want /from/rooturi", got)
+		}
+	})
+
+	t.Run("no root at all", func(t *testing.T) {
+		if got := workspaceRoot(&protocol.InitializeParams{}); got != "" {
+			t.Errorf("workspaceRoot = %q, want empty", got)
+		}
+	})
 }
 
-func TestNegotiatePositionEncodingWithoutGeneralCapabilities(t *testing.T) {
-	// "general" is optional in the protocol and a minimal client may omit it.
-	// Dereferencing it would crash the server during initialize.
-	if got := negotiatePositionEncoding(&protocol.InitializeParams{}); got != protocol.PositionEncodingKindUTF16 {
-		t.Errorf("negotiatePositionEncoding = %q, want utf-16", got)
+func TestNegotiatePositionEncoding(t *testing.T) {
+	tests := []struct {
+		name    string
+		general *protocol.GeneralClientCapabilities
+		want    protocol.PositionEncodingKind
+	}{
+		{
+			name: "utf-8 preferred when offered",
+			general: &protocol.GeneralClientCapabilities{PositionEncodings: []protocol.PositionEncodingKind{
+				protocol.PositionEncodingKindUTF16, protocol.PositionEncodingKindUTF8,
+			}},
+			want: protocol.PositionEncodingKindUTF8,
+		},
+		{
+			name: "utf-16 when it is the only option",
+			general: &protocol.GeneralClientCapabilities{PositionEncodings: []protocol.PositionEncodingKind{
+				protocol.PositionEncodingKindUTF16,
+			}},
+			want: protocol.PositionEncodingKindUTF16,
+		},
+		{
+			name:    "utf-16 when the client offers none",
+			general: &protocol.GeneralClientCapabilities{},
+			want:    protocol.PositionEncodingKindUTF16,
+		},
+		{
+			// A minimal client may omit "general" entirely. Dereferencing it
+			// would crash the server during initialize.
+			name:    "utf-16 when general capabilities are absent",
+			general: nil,
+			want:    protocol.PositionEncodingKindUTF16,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &protocol.InitializeParams{}
+			p.Capabilities.General = tt.general
+			if got := negotiatePositionEncoding(p); got != tt.want {
+				t.Errorf("negotiatePositionEncoding = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

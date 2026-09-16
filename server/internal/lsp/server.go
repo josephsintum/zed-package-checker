@@ -8,15 +8,14 @@ package lsp
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"slices"
-	"strings"
 
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
+
+	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
 // Name is the server name reported to the client and set as the `source` field
@@ -26,6 +25,14 @@ const Name = "package-checker"
 // projectURI is used as the advisory link until real findings carry their own.
 var projectURI = uri.MustParse("https://github.com/josephsintum/zed-package-checker")
 
+// Extractor discovers the dependencies under a project root.
+//
+// Declared here rather than imported so the protocol layer depends only on
+// model types, and can be faked in tests without running a real scan.
+type Extractor interface {
+	Extract(ctx context.Context, root string) ([]model.ExtractedPackage, error)
+}
+
 // Server implements protocol.Server.
 //
 // Embedding protocol.UnimplementedServer means every LSP method the checker
@@ -34,8 +41,9 @@ var projectURI = uri.MustParse("https://github.com/josephsintum/zed-package-chec
 type Server struct {
 	protocol.UnimplementedServer
 
-	log     *slog.Logger
-	version string
+	log       *slog.Logger
+	version   string
+	extractor Extractor
 
 	// client is injected by SetClient once the JSON-RPC connection exists.
 	// It is nil between construction and that call, so it must not be used
@@ -54,8 +62,8 @@ type Server struct {
 //
 // The client is not available at construction time because protocol.NewServer
 // creates it from the server; call SetClient before serving.
-func NewServer(log *slog.Logger, version string) *Server {
-	return &Server{log: log, version: version}
+func NewServer(log *slog.Logger, version string, extractor Extractor) *Server {
+	return &Server{log: log, version: version, extractor: extractor}
 }
 
 // SetClient injects the client handle used to push notifications such as
@@ -103,13 +111,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 // Initialized is sent once the client is ready to receive requests.
 // Diagnostics may only be published from this point onward.
 func (s *Server) Initialized(ctx context.Context, params *protocol.InitializedParams) error {
-	// Stage 1 walking skeleton: publish a single hardcoded diagnostic so the
-	// whole pipe (Zed -> extension -> binary -> stdio -> diagnostics panel) can
-	// be verified before any real scanning exists.
-	//
-	// It is published unconditionally, whether or not the file is open, which
-	// is precisely what the closed-buffer gate needs to exercise.
-	return s.publishSkeletonDiagnostic(ctx)
+	return s.publishExtracted(ctx)
 }
 
 // Shutdown is a no-op: the server holds no state that must be flushed.
@@ -125,98 +127,88 @@ func (s *Server) Exit(ctx context.Context) error {
 	return nil
 }
 
-// publishSkeletonDiagnostic reports a placeholder finding against every
-// package.json in the workspace.
+// publishExtracted reports every dependency found in the workspace.
 //
-// It walks the tree rather than checking the root alone, because that is how
-// real scanning behaves: the workspace root is frequently a repository whose
-// manifests live several directories down.
-func (s *Server) publishSkeletonDiagnostic(ctx context.Context) error {
-	manifests, err := findManifests(s.root, "package.json")
+// These are informational, not findings: nothing has been matched against an
+// advisory database yet. They exist so the path from extraction to the editor
+// can be seen working before matching lands, and are replaced by real findings
+// once it does.
+func (s *Server) publishExtracted(ctx context.Context) error {
+	pkgs, err := s.extractor.Extract(ctx, s.root)
 	if err != nil {
-		return fmt.Errorf("scan %s for manifests: %w", s.root, err)
+		return fmt.Errorf("extract %s: %w", s.root, err)
 	}
-	if len(manifests) == 0 {
-		s.log.Info("no manifests in workspace, nothing to publish", "root", s.root)
+	if len(pkgs) == 0 {
+		s.log.Info("no dependencies found", "root", s.root)
 		return nil
 	}
 
-	for _, manifest := range manifests {
-		diag := protocol.Diagnostic{
-			Range: protocol.Range{
-				Start: protocol.Position{Line: 0, Character: 0},
-				End:   protocol.Position{Line: 0, Character: 1},
-			},
-			Severity:        protocol.DiagnosticSeverityWarning,
-			Source:          protocol.NewOptional(Name),
-			Code:            protocol.String("STAGE-1-SKELETON"),
-			CodeDescription: protocol.CodeDescription{Href: projectURI},
-			Message: protocol.String("package-checker is wired up. " +
-				"This placeholder is replaced by real findings in a later stage."),
-		}
+	// Grouped per file: LSP replaces a file's diagnostics wholesale, so
+	// publishing per package would leave only the last one visible.
+	byFile := make(map[string][]protocol.Diagnostic)
+	for _, p := range pkgs {
+		site := anchorSite(p)
+		byFile[site.Path] = append(byFile[site.Path], diagnosticFor(p, site))
+	}
+
+	for path, diags := range byFile {
 		err := s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
-			URI:         uri.File(manifest),
-			Diagnostics: []protocol.Diagnostic{diag},
+			URI:         uri.File(path),
+			Diagnostics: diags,
 		})
 		if err != nil {
-			return fmt.Errorf("publish diagnostics for %s: %w", manifest, err)
+			return fmt.Errorf("publish diagnostics for %s: %w", path, err)
 		}
 	}
 
-	s.log.Info("published skeleton diagnostics",
-		"manifests", len(manifests),
-		"paths", manifests)
+	s.log.Info("published extracted dependencies",
+		"packages", len(pkgs), "files", len(byFile))
 	return nil
 }
 
-// skipDirs are never descended into. They hold dependency trees and VCS data
-// whose manifests describe other people's packages, not this project's.
+// anchorSite picks where to report a package: the manifest the user can edit,
+// falling back to wherever the version was established.
 //
-// Moves to internal/extract in Stage 3 and gains a user-facing "exclude"
-// setting that adds to it; see the Settings section in docs/PLAN.md.
-var skipDirs = map[string]bool{
-	"node_modules": true,
-	".git":         true,
-	".venv":        true,
-	"venv":         true,
-	"vendor":       true,
-	"target":       true,
-	"dist":         true,
+// Without this the finding lands in a generated lockfile, which is both harder
+// to notice and not the line anyone would change.
+func anchorSite(p model.ExtractedPackage) model.Site {
+	if p.Declared != nil {
+		return *p.Declared
+	}
+	return p.Evidence
 }
 
-// findManifests walks root and returns every file matching name.
-//
-// An error reading root itself is returned: the workspace being absent or
-// unreadable is a real problem worth surfacing. Errors deeper in the tree are
-// skipped instead, because one unreadable directory should not cost the user
-// every other finding.
-func findManifests(root, name string) ([]string, error) {
-	var found []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if path == root {
-				return err
-			}
-			if d != nil && d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			if path != root && (skipDirs[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.Name() == name {
-			found = append(found, path)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
+// diagnosticFor renders one extracted package as a diagnostic at site.
+func diagnosticFor(p model.ExtractedPackage, site model.Site) protocol.Diagnostic {
+	message := fmt.Sprintf("found %s", p.Package)
+	if p.FromRange {
+		message += " (resolved from a version range; may not be what is installed)"
 	}
-	return found, nil
+	if len(p.DepGroups) > 0 {
+		message += fmt.Sprintf(" %v", p.DepGroups)
+	}
+
+	return protocol.Diagnostic{
+		Range: toProtocolRange(site.Range),
+		// Warning rather than Information purely so these are visible while
+		// matching is being built: Zed's diagnostics panel lists errors and
+		// warnings, and silently omits anything below. Replaced by real
+		// severities derived from advisories once matching lands.
+		Severity:        protocol.DiagnosticSeverityWarning,
+		Source:          protocol.NewOptional(Name),
+		Code:            protocol.String("STAGE-3-EXTRACTED"),
+		CodeDescription: protocol.CodeDescription{Href: projectURI},
+		Message:         protocol.String(message),
+	}
+}
+
+// toProtocolRange converts a model range, already zero-based in the negotiated
+// encoding, into the protocol's own type.
+func toProtocolRange(r model.Range) protocol.Range {
+	return protocol.Range{
+		Start: protocol.Position{Line: uint32(r.Start.Line), Character: uint32(r.Start.Column)},
+		End:   protocol.Position{Line: uint32(r.End.Line), Character: uint32(r.End.Column)},
+	}
 }
 
 // workspaceRoot resolves the directory to scan, preferring the first workspace
@@ -230,7 +222,9 @@ func workspaceRoot(params *protocol.InitializeParams) string {
 			}
 		}
 	}
-	//nolint:staticcheck // rootUri is deprecated but still the only root some clients send.
+	// Reviewed 2026-09-16 and kept deliberately: rootUri is deprecated, but a
+	// minimal client may still send only it.
+	//nolint:staticcheck
 	if params.RootURI != nil {
 		if p := params.RootURI.FsPath(); p != "" {
 			return p

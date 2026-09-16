@@ -19,6 +19,7 @@ import (
 	"go.lsp.dev/jsonrpc2"
 	"go.lsp.dev/protocol"
 
+	"github.com/josephsintum/zed-package-checker/server/internal/extract"
 	"github.com/josephsintum/zed-package-checker/server/internal/lsp"
 )
 
@@ -59,10 +60,20 @@ func run() error {
 
 	log.Info("starting", "version", version)
 
+	// scalibr keeps its logger in a package global and writes unstructured
+	// lines to stderr by default, which would land in the editor's LSP log
+	// alongside ours.
+	extract.SetLogger(log)
+
+	extractor, err := extract.New()
+	if err != nil {
+		return fmt.Errorf("configure extraction: %w", err)
+	}
+
 	// The server and the client handle are mutually dependent: NewServer needs
 	// the server to build the connection, and the server needs the resulting
 	// client to push diagnostics. Construct first, inject second.
-	srv := lsp.NewServer(log, version)
+	srv := lsp.NewServer(log, version, extractor)
 	stream := jsonrpc2.NewStream(stdio{})
 	ctx, conn, client := protocol.NewServer(ctx, srv, stream)
 	srv.SetClient(client)

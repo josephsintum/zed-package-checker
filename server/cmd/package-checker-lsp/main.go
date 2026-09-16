@@ -98,9 +98,11 @@ func run() error {
 
 	srv = lsp.NewServer(log, version, eng)
 
+	// NewServer starts dispatching before it returns, so nothing may be handed
+	// to the server after this line. The client it builds rides on the returned
+	// context, which is what every handler and the engine's publisher receive.
 	stream := jsonrpc2.NewStream(stdio{})
-	ctx, conn, client := protocol.NewServer(ctx, srv, stream)
-	srv.SetClient(client)
+	ctx, conn, _ := protocol.NewServer(ctx, srv, stream)
 
 	// Scheduling starts once the root is known, which happens in Initialize.
 	// Starting it here with an empty root would scan the wrong directory.

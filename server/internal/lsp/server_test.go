@@ -108,14 +108,16 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func newTestServer(t *testing.T) (*Server, *fakeClient, *fakeScheduler) {
+// newTestServer returns a server and the context its handlers must be called
+// with. The client travels on the context in production, so a test passing a
+// bare background context would exercise a path the server never sees.
+func newTestServer(t *testing.T) (*Server, context.Context, *fakeClient, *fakeScheduler) {
 	t.Helper()
 	client := newFakeClient()
 	sched := newFakeScheduler()
 	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", sched)
-	s.SetClient(client)
 	s.root = "/proj"
-	return s, client, sched
+	return s, protocol.WithClient(t.Context(), client), client, sched
 }
 
 // finding builds one for tests.
@@ -138,10 +140,27 @@ func finding(name, version string, score float64, path string, line int) model.F
 	}
 }
 
-func TestPublishRendersFindings(t *testing.T) {
-	s, client, _ := newTestServer(t)
+func TestPublishWithoutAClientOnTheContextFails(t *testing.T) {
+	// protocol.NewServer starts dispatching before it returns, so a client
+	// stored on the server after construction races with the handlers reading
+	// it — and a nil one panics. Taking it from the context removes both; this
+	// pins the remaining failure mode to an error rather than a crash.
+	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", newFakeScheduler())
+	s.root = "/proj"
 
-	err := s.Publish(context.Background(), "/proj/package.json", []model.Finding{
+	err := s.Publish(t.Context(), "/proj/package.json", nil)
+	if err == nil {
+		t.Fatal("Publish without a client on the context returned nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "no client") {
+		t.Errorf("Publish error = %v, want it to name the missing client", err)
+	}
+}
+
+func TestPublishRendersFindings(t *testing.T) {
+	s, ctx, client, _ := newTestServer(t)
+
+	err := s.Publish(ctx, "/proj/package.json", []model.Finding{
 		finding("lodash", "4.17.15", 7.5, "/proj/package.json", 5),
 	})
 	if err != nil {
@@ -169,9 +188,9 @@ func TestPublishRendersFindings(t *testing.T) {
 
 func TestPublishEmptyClearsTheFile(t *testing.T) {
 	// This is what removes a diagnostic the user has fixed.
-	s, client, _ := newTestServer(t)
+	s, ctx, client, _ := newTestServer(t)
 
-	if err := s.Publish(context.Background(), "/proj/package.json", nil); err != nil {
+	if err := s.Publish(ctx, "/proj/package.json", nil); err != nil {
 		t.Fatalf("Publish: %v", err)
 	}
 	diags, ok := client.published["/proj/package.json"]
@@ -186,9 +205,9 @@ func TestPublishEmptyClearsTheFile(t *testing.T) {
 func TestSummaryAppearsForMultipleFindings(t *testing.T) {
 	// Per-package diagnostics scatter; the summary is the one line that says
 	// the file has a problem.
-	s, client, _ := newTestServer(t)
+	s, ctx, client, _ := newTestServer(t)
 
-	err := s.Publish(context.Background(), "/proj/package.json", []model.Finding{
+	err := s.Publish(ctx, "/proj/package.json", []model.Finding{
 		finding("a", "1.0.0", 9.8, "/proj/package.json", 3),
 		finding("b", "1.0.0", 7.5, "/proj/package.json", 4),
 		finding("c", "1.0.0", 5.0, "/proj/package.json", 5),
@@ -299,9 +318,9 @@ func TestFindingDataRoundTrips(t *testing.T) {
 }
 
 func TestInitializedRegistersWatchersAndRequestsAScan(t *testing.T) {
-	s, client, sched := newTestServer(t)
+	s, ctx, client, sched := newTestServer(t)
 
-	if err := s.Initialized(context.Background(), &protocol.InitializedParams{}); err != nil {
+	if err := s.Initialized(ctx, &protocol.InitializedParams{}); err != nil {
 		t.Fatalf("Initialized: %v", err)
 	}
 	// Registration happens in the background so it cannot stall initialization.
@@ -318,9 +337,9 @@ func TestInitializedRegistersWatchersAndRequestsAScan(t *testing.T) {
 
 func TestDeletedManifestIsClearedImmediately(t *testing.T) {
 	// Waiting out a debounce would leave diagnostics on a file that is gone.
-	s, _, sched := newTestServer(t)
+	s, ctx, _, sched := newTestServer(t)
 
-	err := s.DidChangeWatchedFiles(context.Background(), &protocol.DidChangeWatchedFilesParams{
+	err := s.DidChangeWatchedFiles(ctx, &protocol.DidChangeWatchedFilesParams{
 		Changes: []protocol.FileEvent{
 			{URI: uri.File("/proj/package.json"), Type: protocol.FileChangeTypeDeleted},
 			{URI: uri.File("/proj/go.mod"), Type: protocol.FileChangeTypeChanged},
@@ -339,10 +358,10 @@ func TestDeletedManifestIsClearedImmediately(t *testing.T) {
 }
 
 func TestDidSaveOnlyRescansForManifests(t *testing.T) {
-	s, _, sched := newTestServer(t)
+	s, ctx, _, sched := newTestServer(t)
 
 	for _, path := range []string{"/proj/src/index.js", "/proj/README.md"} {
-		_ = s.DidSave(context.Background(), &protocol.DidSaveTextDocumentParams{
+		_ = s.DidSave(ctx, &protocol.DidSaveTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
 		})
 	}
@@ -351,7 +370,7 @@ func TestDidSaveOnlyRescansForManifests(t *testing.T) {
 	}
 
 	for _, path := range []string{"/proj/package.json", "/proj/go.mod", "/proj/requirements-dev.txt"} {
-		_ = s.DidSave(context.Background(), &protocol.DidSaveTextDocumentParams{
+		_ = s.DidSave(ctx, &protocol.DidSaveTextDocumentParams{
 			TextDocument: protocol.TextDocumentIdentifier{URI: uri.File(path)},
 		})
 	}
@@ -362,12 +381,12 @@ func TestDidSaveOnlyRescansForManifests(t *testing.T) {
 
 func TestDidOpenRepublishesWithoutScanning(t *testing.T) {
 	// The editor may drop diagnostics for a file it has no buffer for.
-	s, client, sched := newTestServer(t)
+	s, ctx, client, sched := newTestServer(t)
 	sched.findings["/proj/package.json"] = []model.Finding{
 		finding("lodash", "4.17.15", 7.5, "/proj/package.json", 5),
 	}
 
-	err := s.DidOpen(context.Background(), &protocol.DidOpenTextDocumentParams{
+	err := s.DidOpen(ctx, &protocol.DidOpenTextDocumentParams{
 		TextDocument: protocol.TextDocumentItem{URI: uri.File("/proj/package.json")},
 	})
 	if err != nil {
@@ -405,11 +424,11 @@ func TestIsManifest(t *testing.T) {
 }
 
 func TestPublishFailurePropagates(t *testing.T) {
-	s, client, _ := newTestServer(t)
+	s, ctx, client, _ := newTestServer(t)
 	sentinel := errors.New("connection closed")
 	client.err = sentinel
 
-	err := s.Publish(context.Background(), "/proj/package.json", nil)
+	err := s.Publish(ctx, "/proj/package.json", nil)
 	if !errors.Is(err, sentinel) {
 		t.Errorf("Publish error = %v, want it to wrap %v", err, sentinel)
 	}

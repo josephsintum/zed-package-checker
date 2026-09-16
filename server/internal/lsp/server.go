@@ -59,9 +59,6 @@ type Server struct {
 	version   string
 	scheduler Scheduler
 
-	// client is injected by SetClient once the JSON-RPC connection exists.
-	client protocol.Client
-
 	// root is the workspace directory to scan, captured during Initialize.
 	root string
 
@@ -76,8 +73,11 @@ type Server struct {
 
 // NewServer builds a Server.
 //
-// The client is not available at construction time because protocol.NewServer
-// creates it from the server; call SetClient before serving.
+// The client handle is deliberately not stored. protocol.NewServer builds it
+// from the server, so it cannot exist before the server does, and it starts
+// dispatching requests before it returns — any field assigned afterwards races
+// with the handlers reading it. It travels on the request context instead,
+// which is where the protocol package puts it.
 func NewServer(log *slog.Logger, version string, scheduler Scheduler) *Server {
 	return &Server{
 		log:       log,
@@ -90,9 +90,6 @@ func NewServer(log *slog.Logger, version string, scheduler Scheduler) *Server {
 // Ready closes once the workspace root is known.
 func (s *Server) Ready() <-chan struct{} { return s.ready }
 
-// SetClient injects the client handle used to push notifications.
-func (s *Server) SetClient(client protocol.Client) { s.client = client }
-
 // Root returns the workspace directory, known after Initialize.
 func (s *Server) Root() string { return s.root }
 
@@ -100,8 +97,15 @@ func (s *Server) Root() string { return s.root }
 //
 // An empty slice is published rather than skipped: that is what clears
 // diagnostics for a file which is no longer affected.
+//
+// ctx must carry the client, which every context derived from the one
+// protocol.NewServer returns does.
 func (s *Server) Publish(ctx context.Context, path string, findings []model.Finding) error {
-	err := s.client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
+	client, ok := protocol.ClientFromContext(ctx)
+	if !ok {
+		return fmt.Errorf("publish %s: no client on the context", path)
+	}
+	err := client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
 		URI:         uri.File(path),
 		Diagnostics: diagnosticsFor(path, findings),
 	})
@@ -175,7 +179,13 @@ func (s *Server) registerWatchers(ctx context.Context) {
 	// RegisterOptions is raw JSON, so the options are marshalled.
 	options := encodeData(protocol.DidChangeWatchedFilesRegistrationOptions{Watchers: watchers})
 
-	err := s.client.RegisterCapability(ctx, &protocol.RegistrationParams{
+	client, ok := protocol.ClientFromContext(ctx)
+	if !ok {
+		s.log.Warn("no client on the context; file watchers not registered")
+		return
+	}
+
+	err := client.RegisterCapability(ctx, &protocol.RegistrationParams{
 		Registrations: []protocol.Registration{{
 			ID:              "package-checker-watch-manifests",
 			Method:          "workspace/didChangeWatchedFiles",

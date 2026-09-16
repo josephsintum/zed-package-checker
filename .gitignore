@@ -1,5 +1,7 @@
-/target
-/dist
-/server/dist
+# build output, at any depth
+dist/
+target/
 *.wasm
+*.exe
+
 .DS_Store

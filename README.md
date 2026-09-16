@@ -34,7 +34,8 @@ architecture. Recorded here so they don't have to be rediscovered.
 | 3 | Is `PackageInfo.Inventory` non-nil at the API surface, with line numbers? | **Yes** — `Inventory.Location.Descriptor.File.LineNumber` returned `14` correctly |
 | 4 | Do the offline flags work without the env var? | **Yes** — `CompareOffline` + `LocalDBPath` + `DownloadDatabases` work programmatically |
 | 5 | Is the DB parsed per scan or cached per process? | **Per scan.** See below — this is the significant finding |
-| 6 | Do `packagejson`/`pyprojecttoml` extractors work via `PluginsEnabled`? | **Partially** — they load, but reading dependencies needs extra config |
+| 6 | Do `packagejson`/`pyprojecttoml` extractors work via `PluginsEnabled`? | **Yes, with config** — needs `IncludeDependencies` via a plugin-specific proto |
+| 7 | Can we skip osv-scanner's matcher and extract via scalibr directly? | **Yes** — 500 µs and 12 MB instead of 4.5 s and 3.1 GB |
 
 ### Details worth keeping
 
@@ -68,9 +69,38 @@ one-dependency fixture against the real npm database:
 
 The cost is fixed regardless of project size — it decompresses and `protojson.Unmarshal`s
 every advisory in the ecosystem (~100k for npm) and keeps the handful that match. A
-4.5 second, 3 GB scan on every file save is not viable for an editor, so the compact
-derived index described in `docs/PLAN.md` moves from "deferred optimization" to
-required work.
+4.5 second, 3 GB scan on every file save is not viable for an editor.
+
+### The resolution: extract with scalibr, match ourselves
+
+A second probe drove `osv-scalibr` directly for **extraction only**, skipping
+osv-scanner's bundled vulnerability matching:
+
+| | Full `pkg/osvscanner` | Extraction-only |
+|---|---|---|
+| Wall time | 4.5 s | **500 µs** |
+| Allocated | 3.1 GB | **12 MB** |
+| Binary (stripped) | 40.9 MB | 39.4 MB |
+
+So the architecture splits: **`osv-scalibr` for extraction** (21 ecosystems of manifest
+and lockfile parsing, with line numbers, which is the genuinely hard part to replicate)
+and **our own matcher** against a compact index built in CI. That removes the per-scan
+parse entirely and shrinks the npm download from 205 MB to an estimated ~15 MB.
+
+Binary size barely moves, because the container and matcher dependencies arrive through
+scalibr core either way.
+
+Confirmed in the same probe:
+
+- `StoreAbsolutePath: true` yields absolute paths, resolving the root-relative issue above.
+- `DirsToSkip` expects paths relative to the scan roots; skipping by *name*
+  (`node_modules`, `.venv`) requires `SkipDirRegex` or `SkipDirGlob`.
+- `packagejson` with `IncludeDependencies` resolved `^4.17.15` to `4.17.15` at the
+  correct line — the lockfile-free path works.
+- A package found by two extractors is returned **twice** (once from `package.json`,
+  once from `package-lock.json`), so deduplication is required.
+- The manifest's own package (`npm-direct-fixture@1.0.0`) is extracted alongside its
+  dependencies and must be filtered out.
 
 ## License
 

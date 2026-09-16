@@ -23,6 +23,31 @@ Better still, `models.PackageInfo.Inventory.Location.Descriptor.File` carries `{
 
 Two things it does *not* do by default, both verified in source and both handled below: its `lockfile` preset (`internal/scalibrplugin/presets.go`) **excludes the `packagejson` and `pyprojecttoml` extractors** — a project with a manifest but no lockfile yields nothing unless we enable them — and its local-DB cache handling is not safe across processes.
 
+### Stage 0 changed the shape of this (2026-09-16)
+
+The feasibility probe cleared the Zed-side and build-side unknowns, but found that
+osv-scanner re-parses the entire ecosystem database on **every** scan: 4.5 s and 3.1 GB
+for a one-dependency project. A second probe showed that driving `osv-scalibr` directly
+for **extraction only** costs 500 µs and 12 MB.
+
+So the design splits in two, and several sections below are written against the original
+single-`DoScan` shape — where they conflict, this section wins:
+
+- **`extract`** (was `scan`) drives `osv-scalibr` extractors directly. It is the only
+  package importing scalibr. Gets manifest/lockfile parsing for 21 ecosystems with line
+  numbers, which is the genuinely hard part.
+- **`match`** is ours: look each package up in a compact index and evaluate version
+  ranges. `deps.dev/util/semver` (already a scalibr dependency) handles per-ecosystem
+  version semantics.
+- **`index`** is a scheduled CI job that converts OSV into that compact index and
+  publishes it as a release asset. This was the "deferred optimization"; Stage 0 made it
+  required. It also shrinks the npm download from 205 MB to an estimated ~15 MB, which
+  retires the first-run size problem at the same time.
+
+Owning the matcher is a real cost — version-range semantics per ecosystem, plus a data
+pipeline we maintain and that can go stale. It is accepted because the alternative is a
+4.5 s editor stall on every save.
+
 ### Why Go, not Rust
 
 Server language and analyzable ecosystems are orthogonal. `osv-scalibr` covers 21 ecosystems (including `rust`), and its reachability enricher covers Rust too. Adding Cargo later is a `locate/cargo.go`, not a rewrite. There is no Rust equivalent of osv-scanner — `cargo-audit`/`rustsec` is Rust-only — so Rust would mean reimplementing 21 extractors, per-ecosystem version-range matching, the offline DB, and reachability. Go also brings `golang.org/x/mod/modfile` and a `CGO_ENABLED=0` policy that makes cross-compilation trivial.
@@ -201,7 +226,7 @@ t=1012ms   timer fires                -> ONE scan, no network
 Layout is fixed by osv-scanner; we pass `LocalDBPath` and it manages the tree:
 
 ```
-<LocalDBPath>/osv-scanner/{npm,PyPI,Go}/all.zip
+<LocalDBPath>/osv-scalibr/{npm,PyPI,Go}/all.zip   # NOTE: osv-scalibr, not osv-scanner
 ```
 
 Each `all.zip` holds every advisory for that ecosystem as OSV-schema JSON. Source: `https://osv-vulnerabilities.storage.googleapis.com/<Ecosystem>/all.zip`; the 46-ecosystem list is at `ecosystems.txt` in the same bucket. We choose the path explicitly (`os.UserCacheDir()` + our name) rather than relying on osv-scanner's env-var fallback — cache, not config, since it's derived data users should be able to reclaim:
@@ -269,7 +294,7 @@ Each stage is testable in isolation because of the interface seams:
 
 Each stage is a reviewable unit: it ends with code you read, a command you run, and a gate that must pass before the next begins. Each lands as its own commit. `locate` (Stage 7) deliberately comes *after* the first end-to-end (Stage 6): `Inventory` already supplies line numbers, so real diagnostics appear in Zed one stage sooner, and `locate` then only adds precise spans for the code action.
 
-### Stage 0 — Feasibility probe *(throwaway, no code kept)*
+### Stage 0 — Feasibility probe — **DONE** (see README for results; code in `probe/`)
 
 Everything that could invalidate the architecture and that a source read cannot settle. The Zed-side assumptions are already verified above; these need a running Go program.
 
@@ -426,15 +451,17 @@ Settings schema via `initializationOptions`, monorepo exclude tuning, README wit
 
 | Risk | Resolved by |
 |---|---|
-| **`PackageInfo.Inventory` may be nil at the API surface** — the "free line numbers" design depends on it | Stage 0 — highest-impact unknown |
-| **`load()` may run per scan**, re-parsing ~100k advisories each time | Stage 0 answers which; Stage 3 measures; compact index is the remedy |
-| Binary size; `PluginsNoDefaults` won't shrink it (Go links what's imported) | Stage 0 |
-| osv-scanner may not cross-compile `CGO_ENABLED=0` on our import path | Stage 0 |
-| `packagejson`/`pyprojecttoml` extractors may not carry line numbers | Stage 0 |
-| Offline flags may need the env var; `MaxSeverity` may be a label | Stage 0 |
+| ~~`PackageInfo.Inventory` may be nil~~ | **Resolved Stage 0**: non-nil, real line numbers |
+| ~~`load()` may run per scan~~ | **Confirmed Stage 0** — it does. Resolved by the extract/match split above |
+| ~~Binary size~~ | **Resolved Stage 0**: ~41 MB, well under threshold |
+| ~~`CGO_ENABLED=0` cross-compile~~ | **Resolved Stage 0**: all 6 targets build |
+| ~~`packagejson` line numbers~~ | **Resolved Stage 0**: works with `IncludeDependencies` config |
+| ~~Offline flags / `MaxSeverity` format~~ | **Resolved Stage 0**: flags work; `MaxSeverity` is a numeric string |
 | Zed's handling of diagnostics for closed buffers | Stage 1 |
-| Range heuristic produces false positives when the installed version is newer | Accepted for v1; installed-package scanning is the follow-up |
-| npm's 205 MB first-run download may prove painful | Deferred by decision; compact index described in Stage 4 |
+| Range heuristic false positives when the installed version is newer | Accepted for v1; installed-package scanning is the follow-up |
+| **We now own version-range matching** — per-ecosystem semantics are subtle | `deps.dev/util/semver`; differential-test `match` against osv-scanner's own results |
+| **We now own an index pipeline** — it can break or go stale | Index carries a build timestamp; server warns when older than 7 days |
+| ~~npm's 205 MB download~~ | **Resolved by the compact index**, now required rather than deferred |
 | `go.lsp.dev/protocol` is one tag after years dormant | Confined to `internal/lsp`; hand-written structs over `sourcegraph/jsonrpc2` is a one-package fallback |
 | Reachability cost on large repos | Stage 14, timed before defaulting on |
 | Monorepo scan cost | Stage 15, `ExcludePatterns` + `maxScanSeconds` |

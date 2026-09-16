@@ -7,7 +7,14 @@ VERSION    ?= dev
 
 GO_LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all server harness dbcheck scanharness extension test test-race test-differential lint fmt tidy clean help
+# Prefer a golangci-lint installed by `make lint-tools`, which is built against
+# this machine's Go. A package-manager build compiled with an older Go refuses
+# to run against a newer `go` directive, and on a typical PATH it would shadow
+# the working one.
+GOPATH_BIN := $(shell go env GOPATH)/bin
+GOLANGCI   := $(if $(wildcard $(GOPATH_BIN)/golangci-lint),$(GOPATH_BIN)/golangci-lint,golangci-lint)
+
+.PHONY: all server harness dbcheck scanharness extension test test-race test-differential lint lint-tools fmt tidy clean help
 
 all: server extension ## Build both halves
 
@@ -41,11 +48,18 @@ test-differential: dbcheck ## Check our matching against osv-scanner (needs the 
 	cd $(SERVER_DIR) && ./dist/dbcheck -runs 1 npm Go PyPI
 	cd $(SERVER_DIR) && go test -tags differential -run TestMatchesOSVScanner -v ./internal/match/
 
-lint: ## Vet the Go module (golangci-lint if available)
+lint: ## Vet the Go module and run golangci-lint
 	cd $(SERVER_DIR) && go vet ./...
-	@command -v golangci-lint >/dev/null 2>&1 \
-		&& (cd $(SERVER_DIR) && golangci-lint run) \
-		|| echo "golangci-lint not installed, skipped"
+	@if command -v $(GOLANGCI) >/dev/null 2>&1; then \
+		cd $(SERVER_DIR) && $(GOLANGCI) run; \
+	else \
+		echo "golangci-lint not installed; go vet ran, the rest did not."; \
+		echo "install it with: make lint-tools"; \
+	fi
+
+lint-tools: ## Install golangci-lint, built against this machine's Go
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	@echo "installed to $$(go env GOPATH)/bin/golangci-lint"
 
 fmt: ## Format both languages
 	cd $(SERVER_DIR) && gofmt -w .

@@ -168,12 +168,12 @@ func severityFor(f model.Finding) protocol.DiagnosticSeverity {
 // demoted rather than hidden. Malicious packages bypass this entirely; see
 // severityFor.
 func severityLevel(s model.Severity, dev bool, reachable *bool) protocol.DiagnosticSeverity {
-	base := protocol.DiagnosticSeverityWarning
+	// Listed explicitly rather than tested with >=: a severity inserted above
+	// High later must be classified on purpose, not silently inherit Error.
+	var base protocol.DiagnosticSeverity
 	switch s {
 	case model.SeverityCritical, model.SeverityHigh:
 		base = protocol.DiagnosticSeverityError
-	case model.SeverityMedium, model.SeverityLow:
-		base = protocol.DiagnosticSeverityWarning
 	default:
 		base = protocol.DiagnosticSeverityWarning
 	}

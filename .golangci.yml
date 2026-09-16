@@ -1,0 +1,32 @@
+# golangci-lint configuration.
+#
+# Run it with `make lint`, which prefers the copy `make lint-tools` installs:
+# a build compiled against an older Go refuses to run against this module's
+# `go` directive, and silently linting nothing is worse than not linting.
+
+version: "2"
+
+linters:
+  # errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+
+  settings:
+    errcheck:
+      # A deferred Close on a handle we only read from has no error worth
+      # acting on: the read already succeeded or already failed, and the
+      # deferred call cannot change what is returned. Writes are deliberately
+      # absent from this list — a failed Close after a write can mean data was
+      # never flushed, which is exactly the case that must stay checked.
+      exclude-functions:
+        - (*os.File).Close
+        - (*archive/zip.ReadCloser).Close
+        - (io.ReadCloser).Close
+        - (io/fs.File).Close
+
+  exclusions:
+    rules:
+      # Test files reach for the deprecated rootUri on purpose: workspaceRoot
+      # still honours it for minimal clients, and the behaviour needs covering.
+      - path: internal/lsp/server_test\.go
+        linters: [staticcheck]
+        text: "SA1019.*RootURI"

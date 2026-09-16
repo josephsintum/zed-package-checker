@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -39,7 +40,7 @@ func run() error {
 	flag.Parse()
 
 	if flag.NArg() == 0 {
-		return fmt.Errorf("usage: dbcheck [-root DIR] [-runs N] <ecosystem>...")
+		return errors.New("no ecosystem given; usage: dbcheck [-root DIR] [-runs N] <ecosystem>")
 	}
 
 	ecosystems := make([]model.Ecosystem, 0, flag.NArg())

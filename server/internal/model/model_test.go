@@ -41,7 +41,7 @@ func TestSeverityOrdering(t *testing.T) {
 		SeverityUnknown, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical,
 	}
 	for i := 1; i < len(ordered); i++ {
-		if !(ordered[i-1] < ordered[i]) {
+		if ordered[i-1] >= ordered[i] {
 			t.Errorf("%v is not less than %v", ordered[i-1], ordered[i])
 		}
 	}

@@ -26,9 +26,12 @@ var builtinSkipDirs = []string{
 type Option func(*config)
 
 type config struct {
-	extraSkip  []string
-	maxInodes  int
-	ecosystems []string
+	extraSkip []string
+	maxInodes int
+	// ecosystems restricts which ecosystems are extracted. Unread until the
+	// settings schema is wired up in Stage 17, which is where the option that
+	// sets it also arrives.
+	ecosystems []string //nolint:unused // Stage 17, see docs/PLAN.md settings
 }
 
 // WithExclude adds directory names to skip, on top of the built-in list.

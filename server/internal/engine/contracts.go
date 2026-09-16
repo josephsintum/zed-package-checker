@@ -1,10 +1,11 @@
-// Package engine decides when to scan, runs the pipeline and hands results to
-// whoever publishes them.
+// Package engine decides when to scan and what to publish.
 //
-// The interfaces here are declared by the consumer, not by the packages that
-// implement them: each implementation returns a concrete type and happens to
-// satisfy the interface. That keeps dependencies pointing inward and lets the
-// engine be tested against fakes, with no filesystem or network.
+// It owns scheduling and diagnostic state, not analysis: everything about
+// finding vulnerabilities sits behind Scanner, so the concurrency here can be
+// tested against fakes with no filesystem, network or editor involved.
+//
+// All mutable state lives in a single goroutine. Nothing in this package takes
+// a lock, because nothing is shared.
 package engine
 
 import (
@@ -13,58 +14,36 @@ import (
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
-// Extractor finds the dependencies declared or locked in a project.
+// Scanner produces the findings for a project.
 //
-// Implemented by internal/extract over osv-scalibr. Reports what is present
-// without judging it, and returns an empty slice rather than an error when a
-// project has no manifests.
-type Extractor interface {
-	Extract(ctx context.Context, root string) ([]model.ExtractedPackage, error)
+// One seam covering extraction, the advisory database and matching. The engine
+// does not care how a report is produced, only when to ask for one, and a
+// single interface keeps the concurrency tests free of every dependency those
+// stages carry.
+//
+// Implementations must honour cancellation: a scan whose results are no longer
+// wanted is abandoned mid-flight.
+type Scanner interface {
+	Scan(ctx context.Context, root string) (model.Report, error)
 }
 
-// Matcher reports which advisories affect a set of packages.
+// Publisher delivers the findings for one file to the editor.
 //
-// Implemented by internal/match against the local index. Ecosystem-specific
-// version-range containment lives entirely behind this interface.
-type Matcher interface {
-	Match(ctx context.Context, pkgs []model.Package) (map[model.Package][]model.Advisory, error)
-}
-
-// Database owns the local copy of the advisory index.
-//
-// Implemented by internal/db. Refreshing happens in the background and must
-// never block a scan: scanning against a database that is not ready yields no
-// findings rather than an error, because "still downloading" is not a failure.
-type Database interface {
-	// Ready reports whether the index can be matched against.
-	Ready(ecosystems []model.Ecosystem) bool
-
-	// Ensure makes the index available, downloading if needed. Blocks, so
-	// callers run it off the scan path.
-	Ensure(ctx context.Context, ecosystems []model.Ecosystem) error
-}
-
-// Locator narrows a finding from a whole line to the exact span of the
-// dependency name and version.
-//
-// Implemented by internal/locate. ok false is ordinary — a format may have no
-// locator, in which case the whole-line range from extraction stands.
-type Locator interface {
-	Locate(path string, src []byte, key model.PackageKey) (anchor model.Anchor, ok bool)
-}
-
-// Attributor maps a transitive dependency back to the direct dependencies that
-// pull it in. Implemented by internal/graph. Returns nil for a direct
-// dependency.
-type Attributor interface {
-	PathsTo(key model.PackageKey) [][]model.PackageKey
-}
-
-// Publisher receives the findings for one file.
-//
-// Implemented by internal/lsp. Called with an empty slice to clear a file that
-// previously had findings, so "no findings" is a message to deliver, not one to
-// skip.
+// Called with an empty slice to clear a file that previously had findings, so
+// implementations must treat "no findings" as a message to send rather than one
+// to skip. Not sending it leaves stale diagnostics on screen.
 type Publisher interface {
 	Publish(ctx context.Context, path string, findings []model.Finding) error
 }
+
+// Reason records what triggered a scan, for logging.
+type Reason string
+
+// Scan triggers.
+const (
+	ReasonStartup      Reason = "startup"
+	ReasonFileChanged  Reason = "file changed"
+	ReasonFileSaved    Reason = "file saved"
+	ReasonDatabaseSync Reason = "database updated"
+	ReasonManual       Reason = "requested"
+)

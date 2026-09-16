@@ -517,7 +517,7 @@ half-open ranges, `LastAffected`, explicit `Versions` lists, and the "0" sentine
   identical findings. This is the safety net for having taken matching in-house, and it
   is worth the awkwardness of keeping osv-scanner as a test-only dependency.
 
-### Stage 7 — `engine` package *(the concurrency stage)*
+### Stage 7 — `engine` package *(the concurrency stage)* — **DONE**
 
 The actor loop, debounce, coalescing, cancellation, publish-state tracking including **empty arrays to clear stale diagnostics**, deletion handling, and the idle-cheaply path. Tested entirely against a fake `Scanner` — no osv-scanner, no LSP.
 
@@ -526,10 +526,33 @@ The actor loop, debounce, coalescing, cancellation, publish-state tracking inclu
 
 ### Stage 8 — First real end-to-end
 
-Wire stages 3–5 into the LSP layer. Severity mapping, `source`/`code`/`codeDescription`, file watchers, `didOpen` re-publish, **`$/progress` for DB download**. Ranges are full lines from `Inventory`. npm only.
+Assemble `extract`, `db` and `match` into the single `Scanner` the engine expects, and
+wire that to the LSP layer: severity mapping, `source`/`code`/`codeDescription`, file
+watchers, `didOpen` re-publish, **`$/progress` for the database download**. Ranges are
+full lines from `Inventory`; precise spans arrive with `locate`.
+
+All three MVP ecosystems at once — extraction and matching already cover npm, Go and
+Python, so restricting this to npm would mean writing code to hold the others back.
 
 **Review:** `internal/lsp/diagnostics.go`, the wiring in `main.go`.
-**Gate:** open a real vulnerable npm project in Zed and see correct, correctly-positioned diagnostics; open one with no lockfile and see `FromRange` findings; first run shows download progress. First genuinely useful build.
+**Gate:** open a real vulnerable project in Zed and see correct, correctly-positioned
+diagnostics; a lockfile-free project shows `FromRange` findings; the first run shows
+download progress; the summary matches the per-package findings. This repository is a
+usable test case — gopls already reports 17 vulnerabilities in our own dependency tree,
+so we should find them too. First genuinely useful build.
+
+**Also: a per-manifest summary diagnostic.** gopls does this for govulncheck and it is
+visibly better than squiggles alone: one diagnostic anchored on a line that always exists
+— the `module` directive in go.mod, the `name` field in package.json — reading
+"3 vulnerable dependencies (1 critical, 2 high)".
+
+Per-package diagnostics scatter across files the user may not have open, so nothing says
+"this project has a problem" in one place. The summary is that place, and it costs little
+while the publishing path is being wired anyway.
+
+Anchor it on a line the manifest is guaranteed to have, not line 1, so it survives
+reformatting.
+
 
 ### Stage 9 — `locate` package (npm)
 
@@ -571,6 +594,10 @@ Near-free: `x/mod/modfile` gives exact positions, and since Go 1.17 every module
 
 Full advisory markdown on hover. Two code actions:
 - **Upgrade**: minimum-safe = max of `fixed` events across advisories hitting the package, compared with `osv-scalibr/semantic` (public; handles npm semver, PEP 440, Go, Cargo), rewritten preserving the operator (`^4.17.15` → `^4.17.21`). Direct deps with a same-file version span only.
+- **Upgrade all**: applies every available version bump in one manifest, the equivalent
+  of gopls's "Upgrade All". With seventeen findings, one action per finding is where the
+  leverage is lost. Offered on the summary diagnostic rather than on individual findings,
+  and only for those with a same-file version span.
 - **Ignore this advisory**: appends to `osv-scanner.toml` at the worktree root and rescans. The mechanism is free — osv-scanner honours it via `ConfigOverridePath`, and the schema (verified in `internal/config/config.go:16-49`) is richer than just an ID list:
 
 ```go

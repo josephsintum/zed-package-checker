@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -72,6 +73,11 @@ type DB struct {
 
 	// now is overridable so staleness can be tested without sleeping.
 	now func() time.Time
+
+	// validated records the modification time an archive had when it last
+	// passed validation, so a healthy one is not re-read on every Ensure.
+	validatedMu sync.Mutex
+	validated   map[model.Ecosystem]time.Time
 }
 
 // Option configures a DB.
@@ -99,6 +105,7 @@ func New(log *slog.Logger, opts ...Option) (*DB, error) {
 		log:        log,
 		ttl:        defaultTTL,
 		now:        time.Now,
+		validated:  make(map[model.Ecosystem]time.Time),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -219,6 +226,20 @@ func (d *DB) awaitPeer(ctx context.Context, e model.Ecosystem, lock *flock.Flock
 	return nil
 }
 
+// validatedAt returns the modification time an archive had when it last passed
+// validation, or the zero time if it never has.
+func (d *DB) validatedAt(e model.Ecosystem) time.Time {
+	d.validatedMu.Lock()
+	defer d.validatedMu.Unlock()
+	return d.validated[e]
+}
+
+func (d *DB) markValidated(e model.Ecosystem, modTime time.Time) {
+	d.validatedMu.Lock()
+	defer d.validatedMu.Unlock()
+	d.validated[e] = modTime
+}
+
 // stale reports whether an ecosystem needs fetching.
 func (d *DB) stale(e model.Ecosystem) bool {
 	if !exists(d.archivePath(e)) {
@@ -239,10 +260,22 @@ func (d *DB) stale(e model.Ecosystem) bool {
 // indefinitely, because offline matching never re-validates it.
 func (d *DB) heal(e model.Ecosystem) {
 	archive := d.archivePath(e)
-	if !exists(archive) {
+	info, err := os.Stat(archive)
+	if err != nil || !info.Mode().IsRegular() {
 		return
 	}
+
+	// Validation reads the central directory of a file that is 205 MB for npm,
+	// and Ensure is now reached hourly rather than once. An archive is only
+	// ever replaced by an atomic rename, so an unchanged modification time
+	// means unchanged bytes, and bytes that were readable an hour ago still
+	// are.
+	if d.validatedAt(e).Equal(info.ModTime()) {
+		return
+	}
+
 	if err := validateZip(archive); err == nil {
+		d.markValidated(e, info.ModTime())
 		return
 	}
 

@@ -532,3 +532,68 @@ func TestDefaultRootIsUnderTheUserCache(t *testing.T) {
 		t.Errorf("root %q is not under the user cache %q", root, cache)
 	}
 }
+
+func TestHealDoesNotRereadAnUnchangedArchive(t *testing.T) {
+	// Validation reads the central directory of a file that is 205 MB for npm,
+	// and Ensure is reached hourly now that the database revalidates. An
+	// archive is only ever replaced by an atomic rename, so an unchanged
+	// modification time means unchanged bytes.
+	//
+	// The trade-off is deliberate and this test states it: corruption that
+	// leaves the modification time alone is not noticed. Nothing writes these
+	// files in place, so the only way to produce that is to do what this test
+	// does on purpose.
+	srv := newArchiveServer(t, fakeArchive(t, map[string]string{"GHSA-1.json": "{}"}))
+	d := newTestDB(t, srv, WithTTL(0))
+	ctx := context.Background()
+	npm := []model.Ecosystem{model.EcosystemNPM}
+
+	if err := d.Ensure(ctx, npm); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+
+	archive := d.ArchivePath(npm[0])
+	before, err := os.Stat(archive)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+
+	// Truncate it, then put the modification time back.
+	if err := os.WriteFile(archive, []byte("not a zip"), 0o644); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := os.Chtimes(archive, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	if err := d.Ensure(ctx, npm); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+	if _, err := os.Stat(archive); err != nil {
+		t.Error("an archive whose modification time did not change was re-read and discarded")
+	}
+}
+
+func TestHealStillCatchesCorruptionThatChangesTheFile(t *testing.T) {
+	srv := newArchiveServer(t, fakeArchive(t, map[string]string{"GHSA-1.json": "{}"}))
+	d := newTestDB(t, srv, WithTTL(0))
+	ctx := context.Background()
+	npm := []model.Ecosystem{model.EcosystemNPM}
+
+	if err := d.Ensure(ctx, npm); err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+
+	// Corrupt it the way a crash mid-write would: new bytes, new mtime.
+	archive := d.ArchivePath(npm[0])
+	if err := os.WriteFile(archive, []byte("not a zip"), 0o644); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+
+	if err := d.Ensure(ctx, npm); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+	if err := validateZip(archive); err != nil {
+		t.Errorf("a corrupted archive was left in place: %v", err)
+	}
+}

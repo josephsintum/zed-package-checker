@@ -225,13 +225,17 @@ func (e *Engine) handleResult(ctx context.Context, res scanResult) {
 	e.report = res.report
 	byFile := res.report.ByFile()
 
+	// Named before anything is published, because e.published means "last
+	// scan's files" here and "this scan's files" a few lines below.
+	previous := e.published
+
 	for path, findings := range byFile {
 		e.publishOne(ctx, path, findings)
 	}
 
 	// Files that had findings last time and have none now must be published
 	// empty, or the editor keeps showing what was fixed.
-	for path := range e.published {
+	for path := range previous {
 		if _, still := byFile[path]; !still {
 			e.publishOne(ctx, path, nil)
 		}

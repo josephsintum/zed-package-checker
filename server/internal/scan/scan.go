@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -253,7 +254,7 @@ func locateSpans(findings []model.Finding) {
 			parsed[site.Path] = anchors
 		}
 
-		if anchor, ok := anchors[findings[i].Package.Name]; ok {
+		if anchor, ok := lookupAnchor(anchors, findings[i].Package); ok {
 			findings[i].Declared = &anchor
 		}
 	}
@@ -262,14 +263,37 @@ func locateSpans(findings []model.Finding) {
 // locator resolves a manifest's dependency spans, keyed by dependency name.
 type locator func(src []byte, path string) map[string]model.Anchor
 
+// lookupAnchor finds a package's anchor, allowing for the two spellings a name
+// can have.
+//
+// PyPI names are compared after PEP 503 normalisation — "Flask_SQLAlchemy" and
+// "flask-sqlalchemy" are one package — and a requirements file may use either
+// while the extractor reports whichever it read.
+func lookupAnchor(anchors map[string]model.Anchor, pkg model.Package) (model.Anchor, bool) {
+	if anchor, ok := anchors[pkg.Name]; ok {
+		return anchor, true
+	}
+	if pkg.Ecosystem == model.EcosystemPyPI {
+		anchor, ok := anchors[locate.NormalisePyPI(pkg.Name)]
+		return anchor, ok
+	}
+	return model.Anchor{}, false
+}
+
 // locatorFor returns the locator for a manifest, or nil for a file whose spans
 // nothing can narrow yet — a lockfile, or requirements.txt until Stage 13.
 func locatorFor(name string) locator {
-	switch name {
-	case "package.json":
+	switch {
+	case name == "package.json":
 		return locate.PackageJSON
-	case "go.mod":
+	case name == "go.mod":
 		return locate.GoMod
+	case name == "Cargo.toml":
+		// Not merely a tighter span: scalibr's cargotoml records no line at
+		// all, so without this a Rust finding sits on line 1.
+		return locate.CargoToml
+	case strings.HasPrefix(name, "requirements") && strings.HasSuffix(name, ".txt"):
+		return locate.Requirements
 	default:
 		return nil
 	}

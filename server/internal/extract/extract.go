@@ -17,6 +17,8 @@ import (
 	"github.com/google/osv-scalibr/extractor/filesystem/language/javascript/packagejson"
 	"github.com/google/osv-scalibr/extractor/filesystem/language/javascript/packagelockjson"
 	"github.com/google/osv-scalibr/extractor/filesystem/language/python/requirements"
+	"github.com/google/osv-scalibr/extractor/filesystem/language/rust/cargolock"
+	"github.com/google/osv-scalibr/extractor/filesystem/language/rust/cargotoml"
 	scalibrfs "github.com/google/osv-scalibr/fs"
 	"github.com/google/osv-scalibr/plugin"
 
@@ -79,6 +81,8 @@ func buildPlugins(cfg *cpb.PluginConfig) ([]plugin.Plugin, error) {
 		{packagelockjson.Name, packagelockjson.New},
 		{gomod.Name, gomod.New},
 		{requirements.Name, requirements.New},
+		{cargotoml.Name, cargotoml.New},
+		{cargolock.Name, cargolock.New},
 	}
 
 	plugins := make([]plugin.Plugin, 0, len(constructors))

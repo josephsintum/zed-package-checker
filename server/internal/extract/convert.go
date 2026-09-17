@@ -50,7 +50,7 @@ func convert(pkgs []*extractor.Package) []model.ExtractedPackage {
 		})
 	}
 
-	out := reconcile(sightings)
+	out := dropCargoSelf(reconcile(sightings))
 	sort.Slice(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Package.Ecosystem != b.Package.Ecosystem {
@@ -205,12 +205,17 @@ func fromRange(p *extractor.Package) bool {
 
 	for _, plugin := range p.Plugins {
 		switch plugin {
-		case "javascript/packagejson", "python/pyprojecttoml":
+		case "javascript/packagejson", "python/pyprojecttoml", "rust/cargotoml":
 			// These record no comparator, so an exact pin is indistinguishable
 			// from a range and is conservatively reported as a range. It only
 			// matters for projects with no lockfile, since dedup prefers the
 			// lockfile sighting otherwise. internal/locate can resolve this
 			// properly once it parses manifests itself.
+			//
+			// Cargo belongs here on its own merits: a bare "0.1.44" in
+			// Cargo.toml means "^0.1.44", so it is a range even when it looks
+			// like a pin. Treating it as exact also cost the manifest its role
+			// as the declaration, leaving diagnostics on Cargo.lock.
 			return true
 		}
 	}

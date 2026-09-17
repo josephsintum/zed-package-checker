@@ -374,3 +374,41 @@ func TestAWorkspaceLockfileSupersedesItsMembers(t *testing.T) {
 		t.Errorf("lodash version = %q, want the root lockfile's 4.17.21", versions[0])
 	}
 }
+
+func TestCargoLockSupersedesTheManifestAndDropsTheCrateItself(t *testing.T) {
+	// Cargo gives no marker for the project's own crate: cargolock lists every
+	// [[package]] in the lockfile and cargotoml emits the [package] table, so
+	// without filtering a Rust project reports itself as a dependency.
+	got := extractFixture(t, "rust-cargo")
+
+	assertFound(t, got, []found{
+		{pkg: "crates.io:time@0.1.44", file: "Cargo.lock", line: 9},
+	})
+}
+
+func TestAWorkspaceRootKeepsItsMembers(t *testing.T) {
+	// A virtual manifest has [workspace] and no [package], so there is no crate
+	// of its own to drop and nothing may be filtered by accident.
+	root := t.TempDir()
+	writeProject(t, root, map[string]string{
+		"Cargo.toml": "[workspace]\nmembers = [\"app\"]\n",
+		"Cargo.lock": "version = 3\n\n[[package]]\nname = \"time\"\nversion = \"0.1.44\"\n",
+	})
+
+	e, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := e.Extract(context.Background(), root)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Package.Name)
+	}
+	if len(names) != 1 || names[0] != "time" {
+		t.Errorf("extracted %v, want just the dependency", names)
+	}
+}

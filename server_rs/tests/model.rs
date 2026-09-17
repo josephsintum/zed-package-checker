@@ -147,6 +147,7 @@ fn advisory_url() {
 fn fixed_versions_only_for_the_asked_package() {
     let lodash = PackageKey::new(Ecosystem::Npm, "lodash");
     let other = PackageKey::new(Ecosystem::Npm, "other");
+    let repeated = PackageKey::new(Ecosystem::Npm, "repeated");
     let mut a = advisory("GHSA-1", 5.0);
     a.affected = Box::new([
         Affected {
@@ -164,9 +165,20 @@ fn fixed_versions_only_for_the_asked_package() {
             ranges: Box::new([AffectedRange { introduced: "0".into(), fixed: "9.9.9".into(), last_affected: Box::default() }]),
             versions: Box::default(),
         },
+        Affected {
+            package: repeated.clone(),
+            ranges: Box::new([
+                AffectedRange { introduced: "0".into(), fixed: "1.2.3".into(), last_affected: Box::default() },
+                // A second release line, patched in the same release.
+                AffectedRange { introduced: "1.0.0".into(), fixed: "1.2.3".into(), last_affected: Box::default() },
+            ]),
+            versions: Box::default(),
+        },
     ]);
 
     assert_eq!(a.fixed_versions_for(&lodash), vec!["4.17.21"]);
+    // The same fix on several ranges is reported once, not once per range.
+    assert_eq!(a.fixed_versions_for(&repeated), vec!["1.2.3"]);
     assert_eq!(a.fixed_versions_for(&other), vec!["9.9.9"]);
     assert!(a.fixed_versions_for(&PackageKey::new(Ecosystem::Go, "lodash")).is_empty());
 }

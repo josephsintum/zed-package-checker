@@ -374,14 +374,24 @@ impl Advisory {
     }
 
     /// Every version this advisory names as fixing the given package.
+    ///
+    /// Deduplicated: an advisory often carries the same fix on several ranges —
+    /// one per affected release line that was patched together — and "Fixed in
+    /// 0.2.23 or 0.2.23" reads as a bug in the tool rather than a detail of the
+    /// data.
+    ///
+    /// Advisory-local: picking one version that clears every advisory on a
+    /// package needs ecosystem-aware ordering and belongs to the matcher.
     pub fn fixed_versions_for(&self, key: &PackageKey) -> Vec<&str> {
-        self.affected
-            .iter()
-            .filter(|a| &a.package == key)
-            .flat_map(|a| a.ranges.iter())
-            .filter(|r| !r.fixed.is_empty())
-            .map(|r| &*r.fixed)
-            .collect()
+        let mut fixed: Vec<&str> = Vec::new();
+        for affected in self.affected.iter().filter(|a| &a.package == key) {
+            for range in &affected.ranges {
+                if !range.fixed.is_empty() && !fixed.contains(&&*range.fixed) {
+                    fixed.push(&range.fixed);
+                }
+            }
+        }
+        fixed
     }
 }
 

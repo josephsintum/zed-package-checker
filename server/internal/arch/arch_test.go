@@ -122,8 +122,19 @@ func modulePackages(t *testing.T) []string {
 			pkgs = append(pkgs, line)
 		}
 	}
-	if len(pkgs) == 0 {
-		t.Fatal("go list returned no packages")
+	// A wrong working directory narrows this sweep instead of failing it, which
+	// is how every cmd package once sat outside the boundary check while the
+	// test still passed. Assert the shape of what came back rather than trust
+	// that it covered the module.
+	var sawCmd, sawInternal bool
+	for _, pkg := range pkgs {
+		rel := strings.TrimPrefix(pkg, modulePath+"/")
+		sawCmd = sawCmd || strings.HasPrefix(rel, "cmd/")
+		sawInternal = sawInternal || strings.HasPrefix(rel, "internal/")
+	}
+	if !sawCmd || !sawInternal {
+		t.Fatalf("swept %d packages (cmd=%v internal=%v): this is not the whole module",
+			len(pkgs), sawCmd, sawInternal)
 	}
 	return pkgs
 }
@@ -141,7 +152,10 @@ func isThirdParty(imp string) bool {
 func run(t *testing.T, name string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(name, args...)
-	cmd.Dir = ".."
+	// Tests run in their own package directory, so the module root is two up
+	// from internal/arch. Getting this wrong silently narrows the sweep to
+	// whatever subtree it lands in rather than failing.
+	cmd.Dir = "../.."
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s %s: %v\n%s", name, strings.Join(args, " "), err, out)

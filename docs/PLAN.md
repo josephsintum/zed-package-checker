@@ -540,8 +540,14 @@ Python, so restricting this to npm would mean writing code to hold the others ba
 **Gate:** open a real vulnerable project in Zed and see correct, correctly-positioned
 diagnostics; a lockfile-free project shows `FromRange` findings; the first run shows
 download progress; the summary matches the per-package findings. This repository is a
-usable test case — gopls already reports 17 vulnerabilities in our own dependency tree,
-so we should find them too. First genuinely useful build.
+usable test case. First genuinely useful build.
+
+*Checked 2026-09-16.* This gate originally cited "17 vulnerabilities" in our own
+tree, a Stage 0 measurement that is long stale — the dependencies have moved on.
+`govulncheck v1.8.0` now reports exactly one vulnerability in the modules we
+require, `GO-2026-5932` in `golang.org/x/crypto@v0.57.0`, with nothing called.
+We report the same advisory on the same module at the same version, so this
+clause is met. The number to match is whatever govulncheck currently says.
 
 **Also: a per-manifest summary diagnostic.** gopls does this for govulncheck and it is
 visibly better than squiggles alone: one diagnostic anchored on a line that always exists
@@ -649,7 +655,7 @@ re-reads without a restart — plus README with **CC-BY 4.0 attribution for OSV/
 - `make test` → `go test -race ./...`; `make lint` → `golangci-lint run`.
 - Real-Zed check via `dev: install dev extension` for any stage that changes observable behaviour. Unit tests cannot prove the Zed integration.
 - Fixtures under `server/testdata/fixtures/` with pinned known-vulnerable dependencies, matched against `server/testdata/osvdb/`; assert exact `(file, line, col)`. `locate` and `graph` are where bugs will live, and their output is precisely assertable.
-- An import-boundary test asserting only `internal/scan` reaches osv-scanner and only `internal/lsp` reaches `go.lsp.dev`.
+- The import-boundary test in `internal/arch`, which walks every package's direct imports — including behind build tags — and holds the dependency rules stated above. (This line previously repeated the stale rules corrected in "Governing rules"; both places are now the same.)
 
 ## Open risks
 

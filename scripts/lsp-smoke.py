@@ -54,6 +54,32 @@ def read_message(stream) -> dict | None:
     return json.loads(stream.read(length))
 
 
+def summarise_progress(notifications: list) -> list:
+    """Render begin and end in full, and the reports between them as a count.
+
+    A 205 MB download is hundreds of reports; printing each one buries the two
+    that say whether the entry opened and closed correctly.
+    """
+    lines = []
+    reports = 0
+    for params in notifications:
+        token, value = params.get("token"), params.get("value", {})
+        kind = value.get("kind")
+        if kind == "report":
+            reports += 1
+            continue
+        if reports:
+            lines.append(f"... {reports} report(s)")
+            reports = 0
+        detail = value.get("title") or value.get("message") or ""
+        pct = value.get("percentage")
+        lines.append(f"{kind:<6} {token}  {detail}"
+                     + (f"  {pct}%" if pct is not None else ""))
+    if reports:
+        lines.append(f"... {reports} report(s)")
+    return lines
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=DEFAULT_BINARY)
@@ -62,6 +88,11 @@ def main() -> int:
                     help="seconds to wait for diagnostics")
     ap.add_argument("--expect", type=int, default=1,
                     help="stop after this many publishes")
+    ap.add_argument("--db-root",
+                    help="advisory cache directory; point at an empty one to "
+                         "exercise the cold first run and its $/progress")
+    ap.add_argument("--require-progress", action="store_true",
+                    help="fail unless the server reported download progress")
     args = ap.parse_args()
 
     root = pathlib.Path(args.root).resolve()
@@ -69,8 +100,12 @@ def main() -> int:
         print(f"root does not exist: {root}", file=sys.stderr)
         return 2
 
+    cmd = [args.binary, "--stdio"]
+    if args.db_root:
+        cmd += ["--db-root", args.db_root]
+
     proc = subprocess.Popen(
-        [args.binary, "--stdio"],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -117,6 +152,7 @@ def main() -> int:
     # watchers this way, and a real client always replies. Ignoring them wedges
     # anything the server does afterwards.
     published = []
+    progress = []
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         if not readable(proc.stdout, 0.5):
@@ -127,8 +163,14 @@ def main() -> int:
         if msg is None:
             break
         if "id" in msg and "method" in msg:
+            # Answering window/workDoneProgress/create is what permits the
+            # server to report at all; refusing it makes progress vanish
+            # silently, which is the failure this flag exists to catch.
             proc.stdin.write(frame({"jsonrpc": "2.0", "id": msg["id"], "result": None}))
             proc.stdin.flush()
+            continue
+        if msg.get("method") == "$/progress":
+            progress.append(msg["params"])
             continue
         if msg.get("method") == "textDocument/publishDiagnostics":
             published.append(msg["params"])
@@ -144,6 +186,14 @@ def main() -> int:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+    if progress:
+        print(f"\n  $/progress ({len(progress)} notifications)")
+        for p in summarise_progress(progress):
+            print(f"    {p}")
+    elif args.require_progress:
+        print("\nFAIL: no $/progress reported", file=sys.stderr)
+        return 1
 
     if not published:
         print("\nFAIL: no diagnostics published", file=sys.stderr)

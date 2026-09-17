@@ -40,6 +40,7 @@ func run() error {
 		showVersion = flag.Bool("version", false, "print version and exit")
 		logPath     = flag.String("log", "", "also write logs to this file")
 		debug       = flag.Bool("debug", false, "log at debug level")
+		dbRoot      = flag.String("db-root", "", "advisory cache directory (default: the OS cache dir)")
 	)
 	flag.Bool("stdio", true, "communicate over stdio (default, accepted for compatibility)")
 	flag.Parse()
@@ -73,7 +74,13 @@ func run() error {
 	}
 	// The progress reporter needs no wiring to the server: it finds the client
 	// on the request context, so it can be built before either exists.
-	database, err := db.New(log, db.WithProgress(lsp.NewDownloadProgress(log)))
+	dbOpts := []db.Option{db.WithProgress(lsp.NewDownloadProgress(log))}
+	if *dbRoot != "" {
+		// Pointing at a scratch directory is how a cold first run is exercised
+		// without discarding the real cache.
+		dbOpts = append(dbOpts, db.WithRoot(*dbRoot))
+	}
+	database, err := db.New(log, dbOpts...)
 	if err != nil {
 		return fmt.Errorf("configure the advisory database: %w", err)
 	}

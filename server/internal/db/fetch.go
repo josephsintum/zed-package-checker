@@ -77,20 +77,21 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 	}, func(tmp string) error {
 		return verifyArchive(tmp, wantCRC, haveCRC)
 	})
+	if err == nil {
+		// Reported only once the metadata lands too. Without it the archive is
+		// treated as stale and the whole download repeats on the next start,
+		// so announcing "ready" here would be announcing a lie.
+		err = d.writeMeta(d.metaPath(e), meta{
+			ETag:      resp.Header.Get("ETag"),
+			FetchedAt: d.now(),
+			CRC32C:    wantCRC,
+		})
+	}
 	if d.progress != nil {
 		d.progress.Done(ctx, e, err)
 	}
 	if err != nil {
 		return false, fmt.Errorf("install %s: %w", archive, err)
-	}
-
-	err = d.writeMeta(d.metaPath(e), meta{
-		ETag:      resp.Header.Get("ETag"),
-		FetchedAt: d.now(),
-		CRC32C:    wantCRC,
-	})
-	if err != nil {
-		return false, err
 	}
 
 	d.log.Info("database updated",

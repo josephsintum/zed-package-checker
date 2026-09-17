@@ -50,6 +50,12 @@ func TestSummaryAnchorLine(t *testing.T) {
 			want:     1,
 		},
 		{
+			name:     "a nested name is not the manifest's own",
+			file:     "package.json",
+			contents: "{\n  \"author\": {\n    \"name\": \"Jane\"\n  },\n  \"name\": \"thing\"\n}\n",
+			want:     5,
+		},
+		{
 			name:     "a minified manifest is all on line 1",
 			file:     "package.json",
 			contents: `{"name":"thing","version":"1.0.0","dependencies":{"lodash":"^4.17.15"}}`,

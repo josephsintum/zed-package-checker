@@ -12,10 +12,14 @@ import (
 // Only manifests appear here. A lockfile has no comparable line — nothing in
 // package-lock.json is both mandatory and meaningful to a reader — so those
 // fall back to line 1, which is what they would have had anyway.
-var summaryMarkers = map[string]func(trimmed string) bool{
-	"go.mod": func(s string) bool { return strings.HasPrefix(s, "module ") },
+var summaryMarkers = map[string]func(trimmed string, depth int) bool{
+	"go.mod": func(s string, _ int) bool { return strings.HasPrefix(s, "module ") },
 
-	"package.json": func(s string) bool { return strings.HasPrefix(s, `"name"`) },
+	// Depth 1 is the object the file itself is: a "name" inside "author" or
+	// "repository" is somebody else's.
+	"package.json": func(s string, depth int) bool {
+		return depth == 1 && strings.HasPrefix(s, `"name"`)
+	},
 
 	// TOML: `name = "thing"`, under [package] or [project]. The first such key
 	// in either file is the package's own name.
@@ -23,7 +27,7 @@ var summaryMarkers = map[string]func(trimmed string) bool{
 	"pyproject.toml": tomlName,
 }
 
-func tomlName(s string) bool {
+func tomlName(s string, _ int) bool {
 	rest, ok := strings.CutPrefix(s, "name")
 	return ok && strings.HasPrefix(strings.TrimSpace(rest), "=")
 }
@@ -53,12 +57,39 @@ func summaryAnchorLine(path string) int {
 		return 1
 	}
 
-	line := 1
+	line, depth := 1, 0
 	for text := range strings.Lines(string(content)) {
-		if marker(strings.TrimSpace(text)) {
+		trimmed := strings.TrimSpace(text)
+		// Depth before the line, so a key on the same line as the brace that
+		// opens its object is not counted as being inside it.
+		if marker(trimmed, depth+opensBefore(trimmed)) {
 			return line
 		}
+		depth += braceDelta(trimmed)
 		line++
 	}
 	return 1
+}
+
+// opensBefore counts the objects a line opens before its first key, which is
+// what puts `{"name": ...}` on a minified first line at depth 1.
+func opensBefore(line string) int {
+	opened := 0
+	for _, r := range line {
+		if r == '"' {
+			break
+		}
+		if r == '{' {
+			opened++
+		}
+	}
+	return opened
+}
+
+// braceDelta is a deliberately naive nesting count: it does not exclude braces
+// inside string values. A manifest whose values contain braces would anchor the
+// summary somewhere arbitrary, which is the cost this file already accepts
+// everywhere else.
+func braceDelta(line string) int {
+	return strings.Count(line, "{") - strings.Count(line, "}")
 }

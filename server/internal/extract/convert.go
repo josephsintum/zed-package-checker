@@ -93,13 +93,14 @@ func reconcile(sightings []model.ExtractedPackage) []model.ExtractedPackage {
 	locked := make(map[projectKey]bool)
 	declared := make(map[projectKey]model.Site)
 	for _, s := range sightings {
+		scope := scopeOf(s)
 		if s.FromRange {
-			if _, seen := declared[scopeOf(s)]; !seen {
-				declared[scopeOf(s)] = s.Evidence
+			if _, seen := declared[scope]; !seen {
+				declared[scope] = s.Evidence
 			}
 			continue
 		}
-		locked[scopeOf(s)] = true
+		locked[scope] = true
 	}
 
 	seen := make(map[projectPackage]int, len(sightings))

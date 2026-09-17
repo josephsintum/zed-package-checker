@@ -6,6 +6,7 @@ package arch_test
 
 import (
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -72,7 +73,7 @@ func TestThirdPartyBoundariesHold(t *testing.T) {
 		t.Run(b.prefix, func(t *testing.T) {
 			for _, pkg := range packages {
 				rel := strings.TrimPrefix(pkg, modulePath+"/")
-				if allowed(rel, b.owners) {
+				if slices.Contains(b.owners, rel) {
 					continue
 				}
 				for _, imp := range directImports(t, pkg) {
@@ -84,15 +85,6 @@ func TestThirdPartyBoundariesHold(t *testing.T) {
 			}
 		})
 	}
-}
-
-func allowed(pkg string, owners []string) bool {
-	for _, owner := range owners {
-		if pkg == owner {
-			return true
-		}
-	}
-	return false
 }
 
 // directImports returns what a package imports itself, including from its

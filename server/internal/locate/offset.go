@@ -43,7 +43,10 @@ func (li *lineIndex) position(offset int) model.Position {
 	if offset < 0 {
 		offset = 0
 	}
-	line := max(sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > offset })-1, 0)
+	// starts[0] is 0 and offset is non-negative, so the predicate is false at
+	// index 0 and Search returns at least 1. The line is therefore never
+	// negative and needs no floor.
+	line := sort.Search(len(li.starts), func(i int) bool { return li.starts[i] > offset }) - 1
 	return model.Position{Line: line, Column: offset - li.starts[line]}
 }
 

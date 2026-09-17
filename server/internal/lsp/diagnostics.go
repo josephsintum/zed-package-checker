@@ -208,14 +208,15 @@ func severityLevel(s model.Severity, dev bool, reachable *bool) protocol.Diagnos
 		base = protocol.DiagnosticSeverityWarning
 	}
 
-	demote := dev || (reachable != nil && !*reachable)
-	if demote && base == protocol.DiagnosticSeverityError {
+	if !dev && (reachable == nil || *reachable) {
+		return base
+	}
+	// Demoted by exactly one step. base is only ever Error or Warning, so the
+	// two cases below are the whole range.
+	if base == protocol.DiagnosticSeverityError {
 		return protocol.DiagnosticSeverityWarning
 	}
-	if demote && base == protocol.DiagnosticSeverityWarning {
-		return protocol.DiagnosticSeverityInformation
-	}
-	return base
+	return protocol.DiagnosticSeverityInformation
 }
 
 // findingData is attached to a diagnostic so a later code action can act on it

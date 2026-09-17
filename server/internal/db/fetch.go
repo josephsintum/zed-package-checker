@@ -20,6 +20,7 @@ import (
 // already current. The caller holds the lock for this ecosystem.
 func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err error) {
 	archive := d.archivePath(e)
+	metaPath := d.metaPath(e)
 	url := archiveURL(e)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -28,7 +29,7 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 	}
 	// Only offer a validator when the archive it describes is actually present;
 	// otherwise a 304 would leave us with metadata and no data.
-	if m, ok := d.readMeta(d.metaPath(e)); ok && m.ETag != "" && exists(archive) {
+	if m, ok := d.readMeta(metaPath); ok && m.ETag != "" && exists(archive) {
 		req.Header.Set("If-None-Match", m.ETag)
 	}
 
@@ -43,9 +44,9 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 		// Still current. Record the check so staleness is measured from now
 		// rather than from the last time the bytes changed, which for a quiet
 		// ecosystem could be weeks ago.
-		m, _ := d.readMeta(d.metaPath(e))
+		m, _ := d.readMeta(metaPath)
 		m.FetchedAt = d.now()
-		if err := d.writeMeta(d.metaPath(e), m); err != nil {
+		if err := d.writeMeta(metaPath, m); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -81,7 +82,7 @@ func (d *DB) fetch(ctx context.Context, e model.Ecosystem) (updated bool, err er
 		// Reported only once the metadata lands too. Without it the archive is
 		// treated as stale and the whole download repeats on the next start,
 		// so announcing "ready" here would be announcing a lie.
-		err = d.writeMeta(d.metaPath(e), meta{
+		err = d.writeMeta(metaPath, meta{
 			ETag:      resp.Header.Get("ETag"),
 			FetchedAt: d.now(),
 			CRC32C:    wantCRC,

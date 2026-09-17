@@ -1,0 +1,58 @@
+# One crate, flat modules. The Go server splits this across nine packages
+# because Go's only mechanism for a dependency boundary is a package plus an
+# import test; Rust gets the same guarantee from module privacy, so the extra
+# crates would buy nothing but directories. See docs/RUST-VS-GO.md.
+[package]
+name = "package-checker"
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "package_checker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "package-checker-lsp"
+path = "src/main.rs"
+
+[features]
+# A counting global allocator, for reporting what the index retains. Opt-in
+# because its atomic counter is contended by every thread during a parallel
+# load, which distorts the very timings the other half of the benchmark takes.
+count-alloc = []
+
+[dependencies]
+anyhow = "1"
+arc-swap = "1"
+crc32c = "0.6"
+cvss = "2.2"
+ignore = "0.4"
+jsonc-parser = "0.33"
+memmap2 = "0.9"
+rayon = "1"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-std", "signal"] }
+tokio-util = "0.7"
+tower-lsp-server = "0.23"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ureq = "3"
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+# One profile for everything the experiment measures, so a binary-size or
+# wall-time number never quietly compares different optimisation settings.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

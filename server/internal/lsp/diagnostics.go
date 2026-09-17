@@ -119,17 +119,26 @@ func messageFor(f model.Finding) string {
 	if f.Malicious() {
 		b.WriteString("MALICIOUS: ")
 	}
-	fmt.Fprintf(&b, "%s", f.Package)
-
-	switch n := len(f.Advisories); n {
-	case 1:
-		fmt.Fprintf(&b, " — %s", describe(worst))
-	default:
-		fmt.Fprintf(&b, " — %d advisories, worst %s", n, describe(worst))
+	toolchain := f.Package.IsGoToolchain()
+	if toolchain {
+		fmt.Fprintf(&b, "Go toolchain %s", f.Package.Version)
+	} else {
+		fmt.Fprintf(&b, "%s", f.Package)
 	}
 
-	if fixed := worst.FixedVersionsFor(f.Package.PackageKey); len(fixed) > 0 {
-		fmt.Fprintf(&b, ". Fixed in %s", strings.Join(fixed, " or "))
+	fmt.Fprintf(&b, " — %s", countAndSeverity(f, worst))
+
+	// One fixed version is the answer for one advisory. Across seventy-six it
+	// is merely the worst one's fix and clears almost none of the others, so
+	// naming it reads as a remedy when it is not one.
+	if !toolchain || len(f.Advisories) == 1 {
+		if fixed := worst.FixedVersionsFor(f.Package.PackageKey); len(fixed) > 0 {
+			fmt.Fprintf(&b, ". Fixed in %s", strings.Join(fixed, " or "))
+		}
+	}
+	if toolchain {
+		b.WriteString(". The go directive is a minimum, so the toolchain " +
+			"building this may already be newer")
 	}
 	if f.FromRange {
 		b.WriteString(". Version inferred from a range, so the installed one may differ")
@@ -138,6 +147,27 @@ func messageFor(f model.Finding) string {
 		b.WriteString(". Development dependency")
 	}
 	return b.String()
+}
+
+// countAndSeverity says how much is wrong and how bad, omitting a severity
+// nobody published rather than printing "Unknown".
+//
+// The Go vulnerability database carries no CVSS on any of its stdlib
+// advisories, so a toolchain finding would otherwise read "76 advisories,
+// worst Unknown", where the only word doing any work is the number.
+func countAndSeverity(f model.Finding, worst model.Advisory) string {
+	n := len(f.Advisories)
+	rated := worst.Severity() != model.SeverityUnknown
+	switch {
+	case n == 1 && rated:
+		return describe(worst)
+	case n == 1:
+		return "1 known vulnerability"
+	case rated:
+		return fmt.Sprintf("%d advisories, worst %s", n, describe(worst))
+	default:
+		return fmt.Sprintf("%d known vulnerabilities", n)
+	}
 }
 
 // describe renders an advisory's severity and score.

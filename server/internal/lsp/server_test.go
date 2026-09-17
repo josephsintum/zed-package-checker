@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -529,6 +530,93 @@ func TestNegotiatePositionEncoding(t *testing.T) {
 			p.Capabilities.General = tt.general
 			if got := negotiatePositionEncoding(p); got != tt.want {
 				t.Errorf("negotiatePositionEncoding = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// advisories builds n advisories against key, all unrated unless score > 0.
+func advisories(key model.PackageKey, n int, score float64, fixed string) []model.Advisory {
+	out := make([]model.Advisory, 0, n)
+	for i := range n {
+		out = append(out, model.Advisory{
+			ID:        fmt.Sprintf("GO-2023-%04d", i),
+			CVSSScore: score,
+			Affected: []model.Affected{{
+				Package: key,
+				Ranges:  []model.AffectedRange{{Introduced: "0", Fixed: fixed}},
+			}},
+		})
+	}
+	return out
+}
+
+func TestMessageFor(t *testing.T) {
+	stdlib := model.PackageKey{Ecosystem: model.EcosystemGo, Name: "stdlib"}
+	lodash := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "lodash"}
+
+	tests := []struct {
+		name     string
+		finding  model.Finding
+		contains []string
+		absent   []string
+	}{
+		{
+			name: "the toolchain is not a dependency",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: stdlib, Version: "1.21"},
+				Advisories: advisories(stdlib, 76, 0, "1.21.1"),
+			},
+			contains: []string{
+				"Go toolchain 1.21",
+				"76 known vulnerabilities",
+				"go directive is a minimum",
+			},
+			// One advisory's fix clears almost none of seventy-six, and
+			// "Unknown" is what the Go database publishes for all of them.
+			absent: []string{"Fixed in", "Unknown", "stdlib", "advisories, worst"},
+		},
+		{
+			name: "a single toolchain advisory still names its fix",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: stdlib, Version: "1.21"},
+				Advisories: advisories(stdlib, 1, 0, "1.21.1"),
+			},
+			contains: []string{"Go toolchain 1.21", "1 known vulnerability", "Fixed in 1.21.1"},
+			absent:   []string{"Unknown"},
+		},
+		{
+			name: "a rated package keeps its severity and count",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
+				Advisories: advisories(lodash, 6, 7.2, "4.17.21"),
+			},
+			contains: []string{"npm:lodash@4.17.15", "6 advisories, worst High (CVSS 7.2)", "Fixed in 4.17.21"},
+			absent:   []string{"go directive"},
+		},
+		{
+			name: "an unrated dependency drops the severity, not the fix",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
+				Advisories: advisories(lodash, 3, 0, "4.17.21"),
+			},
+			contains: []string{"3 known vulnerabilities", "Fixed in 4.17.21"},
+			absent:   []string{"Unknown"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := messageFor(tt.finding)
+			for _, want := range tt.contains {
+				if !strings.Contains(got, want) {
+					t.Errorf("message %q does not contain %q", got, want)
+				}
+			}
+			for _, unwanted := range tt.absent {
+				if strings.Contains(got, unwanted) {
+					t.Errorf("message %q should not contain %q", got, unwanted)
+				}
 			}
 		})
 	}

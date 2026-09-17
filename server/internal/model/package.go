@@ -17,6 +17,16 @@ func (k PackageKey) String() string {
 	return fmt.Sprintf("%s:%s", k.Ecosystem, k.Name)
 }
 
+// IsGoToolchain reports whether this is the Go toolchain itself rather than a
+// dependency of the project.
+//
+// The gomod extractor reports the toolchain as "stdlib", anchored on the `go`
+// directive. It is kept as a finding — OSV carries real stdlib advisories — but
+// it is not a dependency and should not be described as one.
+func (k PackageKey) IsGoToolchain() bool {
+	return k.Ecosystem == EcosystemGo && k.Name == "stdlib"
+}
+
 // Package is a specific version of a package.
 //
 // Version is the registry's literal string. Comparison and range containment

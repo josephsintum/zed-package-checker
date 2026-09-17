@@ -82,11 +82,17 @@ func loadArchive(ctx context.Context, path string, e model.Ecosystem, idx *Index
 	}
 	defer r.Close()
 
-	// Inflating is 75% of a load's wall time for npm, and compress/flate is the
+	// Inflating is most of a load's wall time for npm, and compress/flate is the
 	// slow part of it. klauspost was already in the module graph, as an
 	// indirect dependency of osv-scalibr.
+	//
+	// Pooled, because archive/zip asks for a decompressor per entry and each
+	// one carries a 32 KiB history window. Across 229,049 entries that was
+	// ~44 KiB allocated per advisory — far more than the advisory itself — and
+	// it is the allocation rate, not the retained size, that makes the
+	// collector overshoot.
 	r.RegisterDecompressor(zip.Deflate, func(in io.Reader) io.ReadCloser {
-		return kpflate.NewReader(in)
+		return takeInflater(in)
 	})
 
 	// Decoding is pure per entry, so it fans out across every core. Indexing is
@@ -182,6 +188,37 @@ func loadArchive(ctx context.Context, path string, e model.Ecosystem, idx *Index
 			ErrNotReady, entries, path, firstErr)
 	}
 	return indexed, skipped, nil
+}
+
+// inflaters recycles DEFLATE readers between zip entries.
+//
+// A pooled reader is returned by Close, which archive/zip calls once it has
+// finished with an entry, so the lifetime is exactly the entry's.
+var inflaters sync.Pool
+
+// pooledInflater returns itself to the pool when the entry is done with it.
+type pooledInflater struct {
+	io.ReadCloser
+}
+
+func (p pooledInflater) Close() error {
+	err := p.ReadCloser.Close()
+	inflaters.Put(p.ReadCloser)
+	return err
+}
+
+func takeInflater(in io.Reader) io.ReadCloser {
+	if pooled, ok := inflaters.Get().(io.ReadCloser); ok {
+		// Every klauspost flate reader is a Resetter; the assertion is belt and
+		// braces against a future one that is not, which would otherwise read
+		// from whichever entry it was last pointed at.
+		if resetter, ok := pooled.(kpflate.Resetter); ok {
+			if err := resetter.Reset(in, nil); err == nil {
+				return pooledInflater{ReadCloser: pooled}
+			}
+		}
+	}
+	return pooledInflater{ReadCloser: kpflate.NewReader(in)}
 }
 
 // decodeEntry reads and converts one advisory from the archive.

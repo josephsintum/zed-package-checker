@@ -97,23 +97,23 @@ func directImports(t *testing.T, pkg string) []string {
 		`{{join .Imports "\n"}}{{"\n"}}{{join .TestImports "\n"}}{{"\n"}}{{join .XTestImports "\n"}}`,
 		pkg)
 
-	var imports []string
+	return nonEmpty(out)
+}
+
+// nonEmpty splits command output into trimmed, non-blank lines.
+func nonEmpty(out string) []string {
+	var lines []string
 	for _, line := range strings.Split(out, "\n") {
 		if line = strings.TrimSpace(line); line != "" {
-			imports = append(imports, line)
+			lines = append(lines, line)
 		}
 	}
-	return imports
+	return lines
 }
 
 func modulePackages(t *testing.T) []string {
 	t.Helper()
-	var pkgs []string
-	for _, line := range strings.Split(run(t, "go", "list", "-tags", buildTags, "./..."), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			pkgs = append(pkgs, line)
-		}
-	}
+	pkgs := nonEmpty(run(t, "go", "list", "-tags", buildTags, "./..."))
 	// A wrong working directory narrows this sweep instead of failing it, which
 	// is how every cmd package once sat outside the boundary check while the
 	// test still passed. Assert the shape of what came back rather than trust

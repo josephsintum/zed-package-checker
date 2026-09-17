@@ -36,11 +36,7 @@ var sections = []string{
 // being saved is an ordinary event rather than a failure.
 func PackageJSON(src []byte, path string) map[string]model.Anchor {
 	pairs, ok := scanSections(src)
-	if !ok {
-		return nil
-	}
-
-	if len(pairs) == 0 {
+	if !ok || len(pairs) == 0 {
 		return nil
 	}
 

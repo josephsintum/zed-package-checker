@@ -259,9 +259,12 @@ func locateSpans(findings []model.Finding) {
 	}
 }
 
+// locator resolves a manifest's dependency spans, keyed by dependency name.
+type locator func(src []byte, path string) map[string]model.Anchor
+
 // locatorFor returns the locator for a manifest, or nil for a file whose spans
 // nothing can narrow yet — a lockfile, or requirements.txt until Stage 13.
-func locatorFor(name string) func(src []byte, path string) map[string]model.Anchor {
+func locatorFor(name string) locator {
 	switch name {
 	case "package.json":
 		return locate.PackageJSON

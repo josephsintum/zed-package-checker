@@ -7,8 +7,11 @@ license = "Apache-2.0"
 
 [lib]
 path = "src/lib.rs"
-crate-type = ["cdylib"]
+# rlib alongside cdylib so the checksum logic can be unit-tested. A verifier
+# that is never exercised is the same hazard as a lint gate that exits zero.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+sha2 = { version = "0.10", default-features = false }
 # 0.8.0 exists in-tree but is marked publish = false; 0.7.0 is the crates.io max.
 zed_extension_api = "0.7"

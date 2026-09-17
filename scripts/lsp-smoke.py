@@ -202,8 +202,12 @@ def main() -> int:
     for params in published:
         print(f"\n  published for {params['uri']}")
         for d in params["diagnostics"]:
-            start = d["range"]["start"]
-            print(f"    [{start['line']}:{start['character']}] "
+            start, end = d["range"]["start"], d["range"]["end"]
+            # Both ends, because a precise span and a whole-line one share a
+            # start and differ only in where they stop.
+            span = (f"{start['line']}:{start['character']}"
+                    f"-{end['line']}:{end['character']}")
+            print(f"    [{span}] "
                   f"severity={d.get('severity')} code={d.get('code')} "
                   f"source={d.get('source')}")
             print(f"    {d['message']}")

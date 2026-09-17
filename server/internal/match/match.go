@@ -95,15 +95,30 @@ func (m *Matcher) applicable(pkg model.Package) []model.Advisory {
 		return nil
 	}
 
+	// Parsed once for the whole candidate set. It was previously parsed inside
+	// every bound comparison, so a package carrying seventy-six advisories paid
+	// for the same string more than a hundred times, each parse allocating a
+	// big.Int per version component.
+	//
+	// A version nothing can parse is a property of the dependency rather than of
+	// any one advisory, so it is reported once and the set skipped — the same
+	// outcome as before, where every advisory in turn failed to compare against
+	// it, and one log line instead of seventy-six.
+	installed, err := parseInstalled(pkg)
+	if err != nil {
+		m.log.Debug("skipping package with an incomparable version",
+			"package", pkg.String(), "error", err)
+		return nil
+	}
+
 	var hits []model.Advisory
 	for _, a := range candidates {
-		ok, err := affects(a, pkg)
+		ok, err := installed.affects(a)
 		if err != nil {
-			// An unparsable version is a property of one advisory or one
-			// dependency, not a reason to abandon the scan. Reporting nothing
-			// for the rest of the project would be a far worse outcome than
-			// missing one comparison, so log and continue.
-			m.log.Debug("skipping advisory with an incomparable version",
+			// A bound this version cannot be compared against is one advisory's
+			// problem, not the scan's: reporting nothing for the rest of the
+			// project would be a far worse outcome than missing one comparison.
+			m.log.Debug("skipping advisory with an incomparable bound",
 				"advisory", a.ID, "package", pkg.String(), "error", err)
 			continue
 		}

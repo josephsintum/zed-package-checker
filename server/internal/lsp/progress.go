@@ -95,14 +95,10 @@ func (p *DownloadProgress) Advance(ctx context.Context, e model.Ecosystem, downl
 // The token is dropped whether the download succeeded or not: a failed one is
 // retried with a fresh token rather than reusing a closed entry.
 func (p *DownloadProgress) Done(ctx context.Context, e model.Ecosystem, err error) {
-	client, token, ok := p.entry(ctx, e)
+	client, token, ok := p.take(ctx, e)
 	if !ok {
 		return
 	}
-
-	p.mu.Lock()
-	delete(p.tokens, e)
-	p.mu.Unlock()
 
 	message := fmt.Sprintf("%s advisories ready", e)
 	if err != nil {
@@ -112,6 +108,27 @@ func (p *DownloadProgress) Done(ctx context.Context, e model.Ecosystem, err erro
 		Kind:    "end",
 		Message: &message,
 	})
+}
+
+// take is entry, and forgets the token as it goes.
+//
+// Reading and deleting under one lock is what makes an entry close exactly
+// once: separate acquisitions leave a window in which two callers both see the
+// token and both send an end for it.
+func (p *DownloadProgress) take(ctx context.Context, e model.Ecosystem) (protocol.Client, protocol.ProgressToken, bool) {
+	client, ok := protocol.ClientFromContext(ctx)
+	if !ok {
+		return nil, nil, false
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	token, started := p.tokens[e]
+	if !started {
+		return nil, nil, false
+	}
+	delete(p.tokens, e)
+	return client, token, true
 }
 
 // entry returns the client and the live token for an ecosystem, if both exist.

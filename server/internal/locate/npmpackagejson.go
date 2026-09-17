@@ -1,9 +1,3 @@
-// Package locate narrows a dependency's diagnostic from a whole line to the
-// exact span of its name and version.
-//
-// Everything here is pure: bytes in, ranges out, no filesystem and no I/O. The
-// manifest is the only input, so the same bytes always produce the same spans
-// and the tests are golden files rather than fixtures on disk.
 package locate
 
 import (

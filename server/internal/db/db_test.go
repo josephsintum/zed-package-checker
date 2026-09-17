@@ -26,7 +26,7 @@ func discardLogger() *slog.Logger {
 
 // fakeArchive builds a minimal but genuine zip, so validation exercises real
 // archive parsing rather than a stub.
-func fakeArchive(t *testing.T, entries map[string]string) []byte {
+func fakeArchive(t testing.TB, entries map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w := zip.NewWriter(&buf)

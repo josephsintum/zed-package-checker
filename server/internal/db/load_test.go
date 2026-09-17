@@ -10,7 +10,7 @@ import (
 )
 
 // advisoryJSON renders an OSV advisory for embedding in a test archive.
-func advisoryJSON(t *testing.T, v any) string {
+func advisoryJSON(t testing.TB, v any) string {
 	t.Helper()
 	raw, err := json.Marshal(v)
 	if err != nil {

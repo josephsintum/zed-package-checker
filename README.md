@@ -7,171 +7,154 @@ IDEs get from their Package Checker plugin, which Zed has no equivalent for.
 Vulnerability data comes from [OSV.dev](https://osv.dev), matched **entirely on your
 machine**. Your dependency list never leaves the box.
 
-> **Status: early development.** Nothing is installable yet.
-> See [`docs/PLAN.md`](docs/PLAN.md) for the full design and staged build order.
+> **Status: early development.** It works, but there is no release to install yet —
+> you build it yourself. See [`docs/PLAN.md`](docs/PLAN.md) for the design and what
+> is still to come.
 
 ## How it works
 
-Zed extensions cannot publish diagnostics — only a language server can. So this is
-two pieces: a thin Rust→WASM shim that Zed loads, which downloads and launches a
-native Go language server that does the actual scanning.
+Zed extensions cannot publish diagnostics — only a language server can. So this is two
+pieces: a thin Rust→WASM shim that Zed loads, and a native Go language server that does
+the scanning.
 
-The server embeds [`osv-scanner/v2`](https://github.com/google/osv-scanner) as a
-library, scans the whole project on startup and on manifest changes, and anchors each
-finding on the line of the **manifest** dependency responsible — so a vulnerability in
-a transitive package shows up on the `express` line of your `package.json`, not in a
-lockfile you never open.
+The server uses [`osv-scalibr`](https://github.com/google/osv-scalibr) to find what a
+project depends on, and its own matcher against a local copy of the OSV database. The
+advisory archives are downloaded once, cached, and refreshed daily; after that, scanning
+touches the network not at all.
 
-## Stage 0 — feasibility findings
+Findings are anchored on the **manifest** line responsible rather than on a lockfile you
+never open, and the span covers the dependency's name rather than the whole line.
 
-Stage 0 was a throwaway probe answering the questions that could have invalidated the
-architecture. Recorded here so they don't have to be rediscovered.
+## What you see
 
-| # | Question | Answer |
+For each vulnerable dependency, a diagnostic on its declaration naming the advisory, the
+worst severity, and the version that fixes it:
+
+```
+npm:lodash@4.17.15 — 6 advisories, worst High (CVSS 7.2). Fixed in 4.17.21
+```
+
+Alongside it:
+
+- **A summary per manifest** when more than one dependency is affected — "3 vulnerable
+  dependencies (2 high)" — anchored on the declaration every file of its kind must
+  contain, so it survives reformatting.
+- **Severity that reflects context.** Development-only dependencies are demoted; a
+  malicious package is never demoted, because "remove this now" does not become less
+  true for a dev dependency.
+- **Honest uncertainty.** A version inferred from a range rather than read from a
+  lockfile says so, because the installed version may differ.
+- **Download progress.** npm's archive is 205 MB, and the first scan of a JavaScript
+  project cannot report anything until it lands, so the wait is reported rather than
+  silent.
+
+## Supported manifests
+
+| Ecosystem | Read from | Precise spans |
 |---|---|---|
-| 1 | Does `pkg/osvscanner` cross-compile `CGO_ENABLED=0`? | **Yes** — all 6 targets (darwin/linux/windows × arm64/amd64) |
-| 2 | Stripped binary size? | **~41 MB** (39.8–43.5 MB). Well under the 80 MB threshold; no need to hand-pick extractors |
-| 3 | Is `PackageInfo.Inventory` non-nil at the API surface, with line numbers? | **Yes** — `Inventory.Location.Descriptor.File.LineNumber` returned `14` correctly |
-| 4 | Do the offline flags work without the env var? | **Yes** — `CompareOffline` + `LocalDBPath` + `DownloadDatabases` work programmatically |
-| 5 | Is the DB parsed per scan or cached per process? | **Per scan.** See below — this is the significant finding |
-| 6 | Do `packagejson`/`pyprojecttoml` extractors work via `PluginsEnabled`? | **Yes, with config** — needs `IncludeDependencies` via a plugin-specific proto |
-| 7 | Can we skip osv-scanner's matcher and extract via scalibr directly? | **Yes** — 500 µs and 12 MB instead of 4.5 s and 3.1 GB |
+| npm | `package.json`, `package-lock.json` | yes |
+| Go | `go.mod` | yes |
+| Python | `requirements.txt` | not yet |
 
-### Details worth keeping
+Lockfile-free projects still work: a constraint is resolved to its lowest satisfying
+version and the finding is marked as inferred. A lockfile, where present, supersedes the
+range — including a workspace lockfile at the repository root governing a nested member.
 
-**The on-disk DB path is `osv-scalibr`, not `osv-scanner`.** The database lands at
-`<LocalDBPath>/osv-scalibr/<Ecosystem>/all.zip`.
+## Building
 
-**`GroupInfo.MaxSeverity` is a numeric string** (`"8.1"`, `"5.3"`) — `strconv.ParseFloat`,
-no label mapping needed.
+Requires Go and, for the extension half, a Rust toolchain with the `wasm32-wasip1`
+target (pinned in `rust-toolchain.toml`).
 
-**`Inventory.Location.Descriptor.File.Path` is root-relative with no leading slash**
-(e.g. `private/tmp/...`), because the scan root is `/`. Use `Source.Path` from the
-enclosing `PackageSource` for the absolute path and take only the line number from
-`File`.
+```sh
+make server      # the language server
+make extension   # the Zed shim, to wasm
+make test        # go test -race ./...
+make lint        # go vet + golangci-lint
+```
 
-**`ParentIDs` is empty for npm**, as predicted — the transitive dependency graph has
-to be reconstructed from `package-lock.json` ourselves.
+Point Zed at the binary with `lsp.package-checker.binary.path`, then install the
+extension as a dev extension.
 
-**`packagejson` only reads dependencies when `includeDependencies` is set**, which comes
-from plugin-specific config (`ScalibrConfig`), not plain `PluginsEnabled`. It also reads
-only `dependencies` — not `devDependencies`, `optionalDependencies` or `peerDependencies`.
+`scripts/lsp-smoke.py` drives the server over stdio without the editor, which is the
+quick way to see what it would publish:
 
-### The performance finding
+```sh
+python3 scripts/lsp-smoke.py --root path/to/project
+```
 
-`zipDB.load()` runs **on every scan**, not once per process. Measured on a
-one-dependency fixture against the real npm database:
+## Design notes
 
-| | Wall time | Peak RSS | Total allocated |
-|---|---|---|---|
-| One scan, warm disk | 4.45 s | **600 MB** | 3.4 GB |
-| Two scans, same process | 8.72 s | **922 MB** | 6.5 GB |
+Findings from the probes that shaped the architecture, kept so they do not have to be
+rediscovered.
 
-Peak RSS is `maximum resident set size` from the kernel; total allocated is Go's
-`TotalAlloc`, which is cumulative throughput and *not* a memory figure — reading
-it as one is an easy mistake to make.
+### Extraction and matching are separate on purpose
 
-Two things matter here. The footprint is a sustained several hundred megabytes
-for the duration of a scan, in a process that stays resident as long as the
-editor does. And the high-water mark grows across scans in one process, which is
-either real retention or Go declining to return pages; the probe cannot tell
-which.
+The obvious approach — call `osv-scanner`'s `pkg/osvscanner` and publish what it returns
+— reparses the advisory database on **every scan**. Measured against a one-dependency
+project:
 
-The cost is fixed regardless of project size — it decompresses and `protojson.Unmarshal`s
-every advisory in the ecosystem (~100k for npm) and keeps the handful that match.
-
-Where the 600 MB goes is worth noting, because it suggests most of it is
-avoidable. `fetchZip` does `os.ReadFile` on the whole 205 MB archive and holds it
-for the duration, then reads entries out of that buffer. Opening the zip from
-disk instead, and streaming entries through, should remove the largest single
-term without changing anything else.
-
-### The resolution: extract with scalibr, match ourselves
-
-A second probe drove `osv-scalibr` directly for **extraction only**, skipping
-osv-scanner's bundled vulnerability matching:
-
-| | Full `pkg/osvscanner` | Extraction-only |
+| | Full `pkg/osvscanner` | Extraction only |
 |---|---|---|
 | Wall time | 4.5 s | **500 µs** |
 | Allocated | 3.1 GB | **12 MB** |
-| Binary (stripped) | 40.9 MB | 39.4 MB |
 
-So the architecture splits: **`osv-scalibr` for extraction** (21 ecosystems of manifest
-and lockfile parsing, with line numbers, which is the genuinely hard part to replicate)
-and **our own matcher** against a compact index built in CI. That removes the per-scan
-parse entirely and shrinks the npm download from 205 MB to an estimated ~15 MB.
+For a CLI that runs once this is correct and efficient. For a server that rescans after
+every `npm install` it is not. So extraction comes from `osv-scalibr` — 21 ecosystems of
+manifest and lockfile parsing, with line numbers, which is the genuinely hard part to
+replicate — and the matching is ours.
 
-Binary size barely moves, because the container and matcher dependencies arrive through
-scalibr core either way.
+Owning the matcher means owning per-ecosystem version ordering, which is subtle. A
+build-tagged differential test checks our results against `osv-scanner`'s own over the
+same fixtures.
 
-Confirmed in the same probe:
+### The database is loaded once, not per scan
 
-- `StoreAbsolutePath: true` yields absolute paths, resolving the root-relative issue above.
-- `DirsToSkip` expects paths relative to the scan roots; skipping by *name*
-  (`node_modules`, `.venv`) requires `SkipDirRegex` or `SkipDirGlob`.
-- `packagejson` with `IncludeDependencies` resolved `^4.17.15` to `4.17.15` at the
-  correct line — the lockfile-free path works.
-- A package found by two extractors is returned **twice** (once from `package.json`,
-  once from `package-lock.json`), so deduplication is required.
-- The manifest's own package (`npm-direct-fixture@1.0.0`) is extracted alongside its
-  dependencies and must be filtered out.
+Archives are streamed from disk into a compact in-memory index, built once per process
+and rebuilt only when the archives change.
 
-## Stage 1 — walking skeleton
+| Ecosystem | Advisories | Load | Retained |
+|---|---|---|---|
+| crates.io | 2,700 | 74 ms | 3 MB |
+| Go | 9,082 | 214 ms | 11 MB |
+| npm | 228,368 | 3.5 s | 110 MB |
 
-Proved the whole pipe end to end — Zed loads the extension, the shim resolves and
-spawns the binary, and diagnostics reach the editor — before any real scanning
-exists. Verified in Zed against this repository as the workspace:
+Only the ecosystems a project actually uses are loaded, so a Go project holds 11 MB
+rather than npm's 110 MB. A project using all three sits around 500 MB resident.
 
-- The extension compiles and installs; the server runs at ~13 MB resident.
-- `positionEncoding` negotiates to **utf-8**, so manifest byte offsets can be used
-  as columns directly with no conversion.
-- Three `package.json` files under `probe/` and `server/testdata/` each receive a
-  diagnostic.
+**Advisory prose dominated the index.** The `details` field averages 662 bytes and,
+across npm's 228k advisories, accounted for 151 MB of a 257 MB index — retained so hover
+text could be rendered for the two or three advisories a project actually matches. It is
+now read from the archive on demand, which took peak RSS from 559 MB to 341 MB.
 
-Two findings that settle open design questions:
+**97% of npm's archive is `MAL-` entries**, not CVEs. The ecosystem's size is driven by
+the malicious-package feed rather than by vulnerability data.
 
-**Zed displays diagnostics for files that were never opened.** Two of the three
-manifests had no buffer open and still appeared in the diagnostics panel. The
-concern from [zed#42784](https://github.com/zed-industries/zed/issues/42784) does
-not apply to unsolicited server-pushed diagnostics, so re-publishing on `didOpen`
-is defensive rather than load-bearing. Anchoring transitive findings on the
-manifest remains the right design regardless, because it is where the user can
-act on them.
+### What Zed does with diagnostics
 
-**`codeDescription` renders as a clickable link** in the diagnostic, so advisory
-URLs reach the user without needing hover support.
+**Zed displays diagnostics for files that were never opened**, so the concern from
+[zed#42784](https://github.com/zed-industries/zed/issues/42784) does not apply to
+unsolicited server-pushed diagnostics. Re-publishing on `didOpen` is defensive rather
+than load-bearing.
 
-Also worth keeping: a workspace root is typically a repository whose manifests sit
-several directories down, so scanning must walk the tree. Checking the root alone
-finds nothing in a real project.
+**`positionEncoding` negotiates to UTF-8**, so manifest byte offsets are used as columns
+directly. The UTF-16 conversion exists for clients that decline it.
 
-## Database loading
+**`codeDescription` renders as a clickable link**, so advisory URLs reach the user
+without needing hover support.
 
-Stage 5 replaced osv-scanner's per-scan parse with a streamed load into a
-compact in-memory index, built once per process and rebuilt only when the
-archives change.
+### Extraction caveats worth knowing
 
-| Ecosystem | Advisories | Load | Retained | Peak RSS |
-|---|---|---|---|---|
-| crates.io | 2,700 | 74 ms | 3 MB | 22 MB |
-| Go | 9,082 | 214 ms | 11 MB | 38 MB |
-| npm | 228,368 | 3.5 s | 110 MB | 341 MB |
-
-Against a baseline of 600 MB and 4.5 s **on every scan**. Lookups are now map
-accesses, and only the ecosystems a project actually uses are loaded — a Go
-project holds 11 MB rather than npm's 110 MB.
-
-Two findings worth keeping:
-
-**Advisory prose dominated the index.** The `details` field averages 662 bytes
-and, across npm's 228k advisories, accounted for 151 MB of a 257 MB index —
-retained so that hover text could be rendered for the two or three advisories a
-project actually matches. It is now read from the archive on demand, which took
-retained memory to 110 MB and peak RSS from 559 MB to 341 MB.
-
-**97% of npm's archive is `MAL-` entries**, not CVEs. The ecosystem's size is
-driven by the malicious-package feed rather than by vulnerability data.
+- A package found by two extractors is returned **twice** — once from `package.json`,
+  once from `package-lock.json` — so reconciliation is required, and it has to be scoped
+  to one project or a sibling's lockfile will suppress a dependency that is genuinely
+  present.
+- The manifest's own package is extracted alongside its dependencies and must be
+  filtered out; a project is not a dependency of itself.
+- `DirsToSkip` expects paths relative to the scan roots, so skipping by *name*
+  (`node_modules`, `.venv`) needs `SkipDirRegex`.
+- The Go extractor reports the toolchain itself as `stdlib`, anchored on the `go`
+  directive. That directive is a **minimum**, not the toolchain in use, and the
+  diagnostic says so.
 
 ## License
 

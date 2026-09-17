@@ -29,9 +29,10 @@ func diagnosticsFor(path string, findings []model.Finding) []protocol.Diagnostic
 // findingDiagnostic renders one vulnerable package.
 func findingDiagnostic(f model.Finding) protocol.Diagnostic {
 	worst := f.Worst()
+	anchor := f.AnchorSite()
 
 	d := protocol.Diagnostic{
-		Range:    toProtocolRange(f.AnchorSite().Range),
+		Range:    toProtocolRange(anchor.Range),
 		Severity: severityFor(f),
 		Source:   protocol.NewOptional(Name),
 		Code:     protocol.String(worst.ID),
@@ -43,7 +44,7 @@ func findingDiagnostic(f model.Finding) protocol.Diagnostic {
 	if href, err := uri.Parse(worst.URL()); err == nil {
 		d.CodeDescription = protocol.CodeDescription{Href: href}
 	}
-	if f.Evidence.Path != f.AnchorSite().Path {
+	if f.Evidence.Path != anchor.Path {
 		// Point at where the version was actually resolved, since the
 		// diagnostic itself sits on the manifest line the user can edit.
 		d.RelatedInformation = []protocol.DiagnosticRelatedInformation{{
@@ -123,7 +124,7 @@ func messageFor(f model.Finding) string {
 	if toolchain {
 		fmt.Fprintf(&b, "Go toolchain %s", f.Package.Version)
 	} else {
-		fmt.Fprintf(&b, "%s", f.Package)
+		b.WriteString(f.Package.String())
 	}
 
 	fmt.Fprintf(&b, " — %s", countAndSeverity(f, worst))

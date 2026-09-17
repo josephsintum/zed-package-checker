@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/google/osv-scanner/v2/pkg/osvscanner"
@@ -163,16 +164,8 @@ func purlTypeFor(ecosystem string) string {
 // normalise sorts and deduplicates, so ordering differences are not treated as
 // disagreements.
 func normalise(hits []hit) []hit {
-	sort.Slice(hits, func(i, j int) bool { return hits[i].String() < hits[j].String() })
-	out := hits[:0]
-	var last string
-	for _, h := range hits {
-		if h.String() != last {
-			out = append(out, h)
-			last = h.String()
-		}
-	}
-	return out
+	slices.SortFunc(hits, func(a, b hit) int { return strings.Compare(a.String(), b.String()) })
+	return slices.CompactFunc(hits, func(a, b hit) bool { return a.String() == b.String() })
 }
 
 func TestMatchesOSVScanner(t *testing.T) {

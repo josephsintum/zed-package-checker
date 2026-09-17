@@ -213,3 +213,44 @@ func TestDownloadCompletionInvalidatesAndAsksForARescan(t *testing.T) {
 		t.Errorf("loads = %d, want 1 once the database became ready", loads)
 	}
 }
+
+func TestAReadyDatabaseIsStillRevalidated(t *testing.T) {
+	// Ready only reports that an archive exists. Before this, a server whose
+	// archive was already on disk never reached Ensure again and so never
+	// consulted its freshness window — an editor open for a week matched
+	// against week-old advisories.
+	database := &fakeDB{ready: true, entered: make(chan struct{})}
+	s := New(discardLogger(), &fakeExtractor{pkgs: npmPackages()}, database)
+	defer func() { _ = s.Close() }()
+
+	if _, err := s.Scan(t.Context(), "/proj"); err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	select {
+	case <-database.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a scan against a ready database never asked it to revalidate")
+	}
+}
+
+func TestRevalidationIsRateLimited(t *testing.T) {
+	// Revalidating on every keystroke-triggered rescan would put a metadata
+	// read on the scan path for no benefit.
+	database := &fakeDB{ready: true, entered: make(chan struct{})}
+	s := New(discardLogger(), &fakeExtractor{pkgs: npmPackages()}, database)
+	defer func() { _ = s.Close() }()
+
+	for range 5 {
+		if _, err := s.Scan(t.Context(), "/proj"); err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+	}
+	<-database.entered
+
+	// Let any further attempt land before counting.
+	time.Sleep(50 * time.Millisecond)
+	if ensures, _ := database.counts(); ensures != 1 {
+		t.Errorf("revalidated %d times across five scans, want once", ensures)
+	}
+}

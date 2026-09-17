@@ -22,30 +22,47 @@ type osvAdvisory struct {
 	Summary   string   `json:"summary"`
 	Details   string   `json:"details"`
 
-	Severity []struct {
-		Type  string `json:"type"`
-		Score string `json:"score"`
-	} `json:"severity"`
+	Severity   []osvSeverity  `json:"severity"`
+	Affected   []osvAffected  `json:"affected"`
+	References []osvReference `json:"references"`
+}
 
-	Affected []struct {
-		Package struct {
-			Ecosystem string `json:"ecosystem"`
-			Name      string `json:"name"`
-		} `json:"package"`
-		Ranges []struct {
-			Type   string `json:"type"`
-			Events []struct {
-				Introduced   string `json:"introduced"`
-				Fixed        string `json:"fixed"`
-				LastAffected string `json:"last_affected"`
-			} `json:"events"`
-		} `json:"ranges"`
-		Versions []string `json:"versions"`
-	} `json:"affected"`
+// osvSeverity is one rating. An advisory may carry several, in more than one
+// CVSS version.
+type osvSeverity struct {
+	Type  string `json:"type"`
+	Score string `json:"score"`
+}
 
-	References []struct {
-		URL string `json:"url"`
-	} `json:"references"`
+// osvAffected is one package an advisory affects, within one ecosystem.
+type osvAffected struct {
+	Package  osvPackage `json:"package"`
+	Ranges   []osvRange `json:"ranges"`
+	Versions []string   `json:"versions"`
+}
+
+// osvPackage names an affected package in its registry's own spelling.
+type osvPackage struct {
+	Ecosystem string `json:"ecosystem"`
+	Name      string `json:"name"`
+}
+
+// osvRange is one version timeline for a package.
+type osvRange struct {
+	Events []osvEvent `json:"events"`
+}
+
+// osvEvent is a single point on that timeline. A range is a sequence of these
+// rather than a pair of bounds, which is the shape flattenRanges resolves.
+type osvEvent struct {
+	Introduced   string `json:"introduced"`
+	Fixed        string `json:"fixed"`
+	LastAffected string `json:"last_affected"`
+}
+
+// osvReference is a link carried by an advisory.
+type osvReference struct {
+	URL string `json:"url"`
 }
 
 // toModel converts a decoded advisory, keeping only the entries affecting the
@@ -67,41 +84,9 @@ func (a *osvAdvisory) toModel(want model.Ecosystem) (model.Advisory, bool) {
 		if model.Ecosystem(entry.Package.Ecosystem) != want || entry.Package.Name == "" {
 			continue
 		}
-		key := model.PackageKey{Ecosystem: want, Name: entry.Package.Name}
-
-		var ranges []model.AffectedRange
-		for _, r := range entry.Ranges {
-			// A range is a sequence of events along one timeline, so a fix or
-			// last-affected marker belongs to the introduction preceding it.
-			var current model.AffectedRange
-			open := false
-			for _, ev := range r.Events {
-				switch {
-				case ev.Introduced != "":
-					if open {
-						ranges = append(ranges, current)
-					}
-					current = model.AffectedRange{Introduced: ev.Introduced}
-					open = true
-				case ev.Fixed != "":
-					current.Fixed = ev.Fixed
-					ranges = append(ranges, current)
-					open = false
-				case ev.LastAffected != "":
-					current.LastAffected = ev.LastAffected
-					ranges = append(ranges, current)
-					open = false
-				}
-			}
-			// An introduction with no fix means still affected.
-			if open {
-				ranges = append(ranges, current)
-			}
-		}
-
 		affected = append(affected, model.Affected{
-			Package:  key,
-			Ranges:   ranges,
+			Package:  model.PackageKey{Ecosystem: want, Name: entry.Package.Name},
+			Ranges:   flattenRanges(entry.Ranges),
 			Versions: entry.Versions,
 		})
 	}
@@ -132,6 +117,49 @@ func (a *osvAdvisory) toModel(want model.Ecosystem) (model.Advisory, bool) {
 		Affected:   affected,
 		References: refs,
 	}, true
+}
+
+// flattenRanges turns OSV's event timelines into explicit ranges.
+//
+// A range is a sequence of events along one version timeline rather than a pair
+// of bounds: an "introduced" opens a window, and the next "fixed" or
+// "last_affected" closes it. An introduction that is never closed means still
+// affected, and stays open-ended.
+//
+// This is the subtlest transformation in the program and the one most able to
+// be confidently wrong — pairing an event with the wrong introduction makes an
+// advisory match versions it does not affect. It is stated here on its own
+// rather than nested inside the filtering toModel does, so that
+// TestToModelPairsRangeEvents has something to point at.
+func flattenRanges(ranges []osvRange) []model.AffectedRange {
+	var out []model.AffectedRange
+	for _, r := range ranges {
+		var current model.AffectedRange
+		open := false
+
+		for _, ev := range r.Events {
+			switch {
+			case ev.Introduced != "":
+				if open {
+					out = append(out, current)
+				}
+				current = model.AffectedRange{Introduced: ev.Introduced}
+				open = true
+			case ev.Fixed != "":
+				current.Fixed = ev.Fixed
+				out = append(out, current)
+				open = false
+			case ev.LastAffected != "":
+				current.LastAffected = ev.LastAffected
+				out = append(out, current)
+				open = false
+			}
+		}
+		if open {
+			out = append(out, current)
+		}
+	}
+	return out
 }
 
 // cvss returns a base score and the vector it came from.

@@ -117,9 +117,9 @@ func reconcile(sightings []model.ExtractedPackage) []model.ExtractedPackage {
 	out := make([]model.ExtractedPackage, 0, len(sightings))
 	for _, s := range sightings {
 		key := scopeOf(s)
-		if s.FromRange && locked[key] {
-			// Superseded by this project's own lockfile; its location is still
-			// used below.
+		if s.FromRange && lockedAtOrAbove(locked, key) {
+			// Superseded by a lockfile governing this project; its location is
+			// still used below.
 			continue
 		}
 		dedupe := projectPackage{dir: key.dir, pkg: s.Package}
@@ -149,6 +149,29 @@ type projectKey struct {
 type projectPackage struct {
 	dir string
 	pkg model.Package
+}
+
+// lockedAtOrAbove reports whether this project, or any directory above it,
+// pins the package in a lockfile.
+//
+// A workspace keeps one lockfile at the root and a manifest per member, so the
+// pin that supersedes packages/app/package.json sits several directories up.
+// Walking upwards finds it while still refusing to let a sibling project's
+// lockfile reach across, which is the case this scoping exists for. Only
+// directories that produced a sighting are in the map, so the walk cannot
+// match anything outside the scan.
+func lockedAtOrAbove(locked map[projectKey]bool, key projectKey) bool {
+	dir := key.dir
+	for {
+		if locked[projectKey{dir: dir, pkg: key.pkg}] {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 // scopeOf locates a sighting's project. A manifest and the lockfile that

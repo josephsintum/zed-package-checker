@@ -333,3 +333,44 @@ func TestReconciliationIsScopedToOneProject(t *testing.T) {
 		}
 	}
 }
+
+func TestAWorkspaceLockfileSupersedesItsMembers(t *testing.T) {
+	// A workspace keeps one lockfile at the root and a manifest per member, so
+	// the pin that supersedes a member's range sits several directories up.
+	// Scoping reconciliation to the exact directory alone would miss it and
+	// report the range's lowest satisfying version — a version nobody has
+	// installed — alongside the real one.
+	root := t.TempDir()
+
+	writeProject(t, root, map[string]string{
+		"package.json": `{"name":"ws","version":"1.0.0","workspaces":["packages/*"]}`,
+		"package-lock.json": `{"name":"ws","version":"1.0.0","lockfileVersion":3,"packages":{
+			"":{"name":"ws","version":"1.0.0"},
+			"node_modules/lodash":{"version":"4.17.21"}}}`,
+	})
+	writeProject(t, filepath.Join(root, "packages", "app"), map[string]string{
+		"package.json": `{"name":"app","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}`,
+	})
+
+	e, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := e.Extract(context.Background(), root)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	var versions []string
+	for _, p := range got {
+		if p.Package.Name == "lodash" {
+			versions = append(versions, p.Package.Version)
+		}
+	}
+	if len(versions) != 1 {
+		t.Fatalf("lodash reported %d times (%v), want once: the root lockfile governs the member", len(versions), versions)
+	}
+	if versions[0] != "4.17.21" {
+		t.Errorf("lodash version = %q, want the root lockfile's 4.17.21", versions[0])
+	}
+}

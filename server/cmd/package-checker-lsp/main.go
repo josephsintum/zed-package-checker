@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	rtdebug "runtime/debug"
 	"syscall"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/db"
@@ -89,9 +90,17 @@ func run() error {
 	// scans, and a scan that finds the database missing needs to ask for a
 	// rescan once the download lands. The callback is set after both exist.
 	var eng *engine.Engine
-	scanner := scan.New(log, extractor, database, scan.OnDatabaseReady(func() {
-		eng.Request(engine.ReasonDatabaseSync)
-	}))
+	scanner := scan.New(log, extractor, database,
+		scan.OnDatabaseReady(func() {
+			eng.Request(engine.ReasonDatabaseSync)
+		}),
+		// The server states its own memory policy rather than inheriting
+		// whatever GOMEMLIMIT the editor happened to launch it with.
+		scan.WithMemoryLimit(func(bytes int64) {
+			rtdebug.SetMemoryLimit(bytes)
+			log.Info("heap limit set", "mb", bytes>>20)
+		}),
+	)
 
 	// The server is both the protocol endpoint and the publisher the engine
 	// writes through, so it is built before the engine and wired after.

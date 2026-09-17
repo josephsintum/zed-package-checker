@@ -46,6 +46,15 @@ type Scanner struct {
 	// ask for the rescan that will finally produce findings.
 	onReady func()
 
+	// setMemoryLimit applies a soft heap limit, when the caller supplied one.
+	// Held here rather than called from db because the size is db's knowledge
+	// but the process's memory policy is main's decision.
+	setMemoryLimit func(int64)
+	// limitApplied is the largest limit set so far, guarded by mu. Only ever
+	// raised: lowering it under a live index would make the collector fight a
+	// heap it cannot shrink.
+	limitApplied int64
+
 	// mu guards the cached index. Scans can overlap: cancelling a superseded
 	// scan is best-effort, so a new one may start while the old is still
 	// unwinding.
@@ -69,6 +78,15 @@ type Option func(*Scanner)
 
 // OnDatabaseReady sets the callback fired when a background download completes.
 func OnDatabaseReady(f func()) Option { return func(s *Scanner) { s.onReady = f } }
+
+// WithMemoryLimit supplies the setter for the process's soft heap limit,
+// normally debug.SetMemoryLimit.
+//
+// Injected rather than called directly so that a package which merely loads a
+// database does not reach out and reconfigure the runtime.
+func WithMemoryLimit(set func(int64)) Option {
+	return func(s *Scanner) { s.setMemoryLimit = set }
+}
 
 // New builds a Scanner.
 func New(log *slog.Logger, extractor Extractor, database Database, opts ...Option) *Scanner {
@@ -133,6 +151,14 @@ func (s *Scanner) indexFor(ctx context.Context, ecosystems []model.Ecosystem) (*
 
 	if s.index != nil && s.index.Covers(ecosystems) {
 		return s.index, nil
+	}
+
+	// Raised before the load, not after: the overshoot happens while decoding.
+	if s.setMemoryLimit != nil {
+		if want := db.MemoryLimitFor(ecosystems); want > s.limitApplied {
+			s.limitApplied = want
+			s.setMemoryLimit(want)
+		}
 	}
 
 	index, err := s.database.Load(ctx, ecosystems)

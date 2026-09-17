@@ -21,7 +21,6 @@ package match
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -56,7 +55,7 @@ func fixtureDir(t *testing.T, name string) string {
 // ourHits runs extraction, database loading and matching.
 func ourHits(t *testing.T, root string) []hit {
 	t.Helper()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	log := discardLogger()
 
 	extractor, err := extract.New()
 	if err != nil {
@@ -105,11 +104,11 @@ func ourHits(t *testing.T, root string) []hit {
 func theirHits(t *testing.T, root string) []hit {
 	t.Helper()
 
-	database, err := db.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	database, err := db.New(discardLogger())
 	if err != nil {
 		t.Fatalf("db.New: %v", err)
 	}
-	osvscanner.SetLogger(slog.NewTextHandler(io.Discard, nil))
+	osvscanner.SetLogger(slog.DiscardHandler)
 
 	actions := osvscanner.ScannerActions{
 		DirectoryPaths: []string{root},

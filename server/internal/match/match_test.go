@@ -2,7 +2,6 @@ package match
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"testing"
 
@@ -10,7 +9,7 @@ import (
 )
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // mapIndex is an advisory index backed by a map, so matching can be tested

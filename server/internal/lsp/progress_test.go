@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"sync"
 	"testing"
 
@@ -67,7 +65,7 @@ func (c *progressClient) at(i int) map[string]any {
 func newProgress(t *testing.T) (*DownloadProgress, context.Context, *progressClient) {
 	t.Helper()
 	client := &progressClient{}
-	p := NewDownloadProgress(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := NewDownloadProgress(discardLogger())
 	return p, protocol.WithClient(t.Context(), client), client
 }
 
@@ -106,7 +104,7 @@ func TestProgressReportsBeginReportEnd(t *testing.T) {
 
 func TestProgressWithoutAClientDoesNothing(t *testing.T) {
 	// The download runs whether or not anything is watching it.
-	p := NewDownloadProgress(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p := NewDownloadProgress(discardLogger())
 	p.Start(t.Context(), model.EcosystemNPM, 10)
 	p.Advance(t.Context(), model.EcosystemNPM, 5, 10)
 	p.Done(t.Context(), model.EcosystemNPM, nil)

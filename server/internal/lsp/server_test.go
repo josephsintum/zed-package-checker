@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"slices"
 	"strings"
@@ -113,11 +112,15 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // newTestServer returns a server and the context its handlers must be called
 // with. The client travels on the context in production, so a test passing a
 // bare background context would exercise a path the server never sees.
+// discardLogger is the logger every test here wants: the server logs on paths
+// under test, and none of it is what is being asserted.
+func discardLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
+
 func newTestServer(t *testing.T) (*Server, context.Context, *fakeClient, *fakeScheduler) {
 	t.Helper()
 	client := newFakeClient()
 	sched := newFakeScheduler()
-	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", sched)
+	s := NewServer(discardLogger(), "test", sched)
 	s.root = "/proj"
 	return s, protocol.WithClient(t.Context(), client), client, sched
 }
@@ -170,7 +173,7 @@ func TestPublishWithoutAClientOnTheContextFails(t *testing.T) {
 	// stored on the server after construction races with the handlers reading
 	// it — and a nil one panics. Taking it from the context removes both; this
 	// pins the remaining failure mode to an error rather than a crash.
-	s := NewServer(slog.New(slog.NewTextHandler(io.Discard, nil)), "test", newFakeScheduler())
+	s := NewServer(discardLogger(), "test", newFakeScheduler())
 	s.root = "/proj"
 
 	err := s.Publish(t.Context(), "/proj/package.json", nil)

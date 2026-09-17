@@ -508,7 +508,6 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
- "tokio-util",
  "tower-lsp-server",
  "tracing",
  "tracing-subscriber",

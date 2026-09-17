@@ -14,7 +14,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 	"time"
 
@@ -101,7 +100,7 @@ func (s *Scanner) Scan(ctx context.Context, root string) (model.Report, error) {
 		return model.Report{Root: root, ScannedAt: time.Now()}, nil
 	}
 
-	ecosystems := ecosystemsOf(pkgs)
+	ecosystems := model.EcosystemsOf(pkgs)
 	if !s.database.Ready(ecosystems) {
 		s.warmInBackground(ctx, ecosystems)
 		return model.Report{}, fmt.Errorf("%w: %v", db.ErrNotReady, ecosystems)
@@ -276,15 +275,3 @@ func locatorFor(name string) func(src []byte, path string) map[string]model.Anch
 // NotReady reports whether err means the database is still downloading, rather
 // than that something went wrong.
 func NotReady(err error) bool { return errors.Is(err, db.ErrNotReady) }
-
-// ecosystemsOf returns the distinct ecosystems present, in a stable order.
-func ecosystemsOf(pkgs []model.ExtractedPackage) []model.Ecosystem {
-	var out []model.Ecosystem
-	for _, p := range pkgs {
-		if !slices.Contains(out, p.Package.Ecosystem) {
-			out = append(out, p.Package.Ecosystem)
-		}
-	}
-	slices.Sort(out)
-	return out
-}

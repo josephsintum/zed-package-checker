@@ -34,14 +34,15 @@ func main() {
 	}
 	fmt.Printf("extract:  %-8v %d packages\n", time.Since(t).Round(time.Millisecond), len(pkgs))
 
-	var ecos []model.Ecosystem
 	counts := map[model.Ecosystem]int{}
 	for _, p := range pkgs {
 		counts[p.Package.Ecosystem]++
 	}
-	for e, n := range counts {
-		ecos = append(ecos, e)
-		fmt.Printf("          %-12s %d\n", e, n)
+	// Printed in the same order the scan will load them, so two runs of a
+	// timing harness can be compared line by line.
+	ecos := model.EcosystemsOf(pkgs)
+	for _, e := range ecos {
+		fmt.Printf("          %-12s %d\n", e, counts[e])
 	}
 
 	t = time.Now()

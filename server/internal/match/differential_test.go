@@ -66,12 +66,7 @@ func ourHits(t *testing.T, root string) []hit {
 		t.Fatalf("Extract: %v", err)
 	}
 
-	ecosystems := []model.Ecosystem{}
-	for _, p := range pkgs {
-		if !slices.Contains(ecosystems, p.Package.Ecosystem) {
-			ecosystems = append(ecosystems, p.Package.Ecosystem)
-		}
-	}
+	ecosystems := model.EcosystemsOf(pkgs)
 
 	database, err := db.New(log)
 	if err != nil {

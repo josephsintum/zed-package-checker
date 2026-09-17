@@ -114,12 +114,25 @@ and rebuilt only when the archives change.
 
 | Ecosystem | Advisories | Load | Retained |
 |---|---|---|---|
-| crates.io | 2,700 | 74 ms | 3 MB |
-| Go | 9,082 | 214 ms | 11 MB |
-| npm | 228,368 | 3.5 s | 110 MB |
+| crates.io | 2,702 | 14 ms | 3 MB |
+| Go | 9,082 | 37 ms | 11 MB |
+| PyPI | 25,029 | 110 ms | 59 MB |
+| npm | 228,368 | 613 ms | 110 MB |
 
 Only the ecosystems a project actually uses are loaded, so a Go project holds 11 MB
-rather than npm's 110 MB. A project using all three sits around 500 MB resident.
+rather than npm's 110 MB — the single largest saving available, since most projects
+never touch npm's archive at all.
+
+npm's load was 3.5 s when first written. Three changes account for the rest: entries
+are decoded across every core, a faster DEFLATE implementation replaced the standard
+library's, and the reader it needs is recycled between entries rather than allocated
+per entry — that last one alone was 44 KB of garbage per advisory, and took the
+collector from 75 collections during a load to 21.
+
+The server also sets its own soft heap limit, sized from the ecosystems it is about to
+load. Parallel decoding raises the allocation rate enough that Go's collector
+overshoots; the limit returns peak memory to roughly the retained size without the
+throughput cost that tuning `GOGC` would bring.
 
 **Advisory prose dominated the index.** The `details` field averages 662 bytes and,
 across npm's 228k advisories, accounted for 151 MB of a 257 MB index — retained so hover

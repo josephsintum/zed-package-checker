@@ -239,7 +239,8 @@ func locateSpans(findings []model.Finding) {
 
 	for i := range findings {
 		site := findings[i].AnchorSite()
-		if filepath.Base(site.Path) != "package.json" {
+		locator := locatorFor(filepath.Base(site.Path))
+		if locator == nil {
 			continue
 		}
 
@@ -248,7 +249,7 @@ func locateSpans(findings []model.Finding) {
 			// Cached even when it fails, so an unreadable manifest is not
 			// re-read once per finding.
 			if src, err := os.ReadFile(site.Path); err == nil {
-				anchors = locate.PackageJSON(src, site.Path)
+				anchors = locator(src, site.Path)
 			}
 			parsed[site.Path] = anchors
 		}
@@ -256,6 +257,19 @@ func locateSpans(findings []model.Finding) {
 		if anchor, ok := anchors[findings[i].Package.Name]; ok {
 			findings[i].Declared = &anchor
 		}
+	}
+}
+
+// locatorFor returns the locator for a manifest, or nil for a file whose spans
+// nothing can narrow yet — a lockfile, or requirements.txt until Stage 13.
+func locatorFor(name string) func(src []byte, path string) map[string]model.Anchor {
+	switch name {
+	case "package.json":
+		return locate.PackageJSON
+	case "go.mod":
+		return locate.GoMod
+	default:
+		return nil
 	}
 }
 

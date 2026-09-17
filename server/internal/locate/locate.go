@@ -7,10 +7,10 @@
 package locate
 
 import (
-	"slices"
 	"bytes"
 	"encoding/json"
 	"io"
+	"slices"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )

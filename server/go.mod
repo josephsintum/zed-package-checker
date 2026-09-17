@@ -7,6 +7,7 @@ require (
 	github.com/gofrs/flock v0.13.1
 	github.com/google/osv-scalibr v0.5.3-0.20260911142458-3090dbb7aaa2
 	github.com/google/osv-scanner/v2 v2.6.0
+	github.com/klauspost/compress v1.19.1
 	github.com/pandatix/go-cvss v0.6.4
 	go.lsp.dev/jsonrpc2 v1.0.1
 	go.lsp.dev/protocol v1.0.1
@@ -83,7 +84,6 @@ require (
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/jedib0t/go-pretty/v6 v6.8.3 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
-	github.com/klauspost/compress v1.19.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/lunixbochs/struc v0.0.0-20241101090106-8d528fa2c543 // indirect
 	github.com/masahiro331/go-ext4-filesystem v0.0.0-20260423010602-fe51f5b5e52b // indirect

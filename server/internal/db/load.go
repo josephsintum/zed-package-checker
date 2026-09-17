@@ -5,11 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"runtime"
 	"strings"
+	"sync"
 	"time"
+
+	kpflate "github.com/klauspost/compress/flate"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
+
+// decodeQueue bounds how many entries are in flight between the walker, the
+// decoders and the indexer, so the archive is never buffered whole.
+const decodeQueue = 512
 
 // Load parses the archives for the given ecosystems into an in-memory index.
 //
@@ -73,43 +82,94 @@ func loadArchive(ctx context.Context, path string, e model.Ecosystem, idx *Index
 	}
 	defer r.Close()
 
+	// Inflating is 75% of a load's wall time for npm, and compress/flate is the
+	// slow part of it. klauspost was already in the module graph, as an
+	// indirect dependency of osv-scalibr.
+	r.RegisterDecompressor(zip.Deflate, func(in io.Reader) io.ReadCloser {
+		return kpflate.NewReader(in)
+	})
+
+	// Decoding is pure per entry, so it fans out across every core. Indexing is
+	// not: one goroutine owns the map and is fed over a channel.
+	//
+	// Insertion order therefore no longer matches archive order. Safe because
+	// match sorts each package's advisories by severity then id, which is a
+	// total order — but it is the reason this is not simply a parallel map.
+	type decoded struct {
+		advisory model.Advisory
+		name     string
+		ok       bool
+		err      error
+	}
+
+	jobs := make(chan *zip.File, decodeQueue)
+	results := make(chan decoded, decodeQueue)
+
+	go func() {
+		defer close(jobs)
+		for _, entry := range r.File {
+			if !strings.HasSuffix(entry.Name, ".json") {
+				continue
+			}
+			select {
+			case jobs <- entry:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// One buffer per worker, rather than a json.Decoder and its read
+			// buffer allocated 229,049 times.
+			buf := make([]byte, 0, 16<<10)
+			for entry := range jobs {
+				advisory, ok, err := decodeEntry(entry, e, &buf)
+				results <- decoded{advisory: advisory, name: entry.Name, ok: ok, err: err}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
 	var (
 		entries  int
 		firstErr error
 	)
-	for i, entry := range r.File {
-		// Loading a large ecosystem takes seconds; a cancelled scan or a
-		// shutting-down server should not wait for it to finish.
-		if i%512 == 0 {
-			if err := ctx.Err(); err != nil {
-				return indexed, skipped, err
-			}
-		}
-		if !strings.HasSuffix(entry.Name, ".json") {
-			continue
-		}
+	// Drained to completion even after cancellation, so no worker is left
+	// blocked on a send and no goroutine outlives this call.
+	for res := range results {
 		entries++
-
-		advisory, ok, err := decodeEntry(entry, e)
-		if err != nil {
+		if res.err != nil {
 			// One malformed advisory must not cost the user every other one.
 			// Archives are generated, so this should not happen; if it does,
 			// the remaining thousands are still worth having. The count goes
 			// back to the caller rather than being dropped on the floor.
 			skipped++
 			if firstErr == nil {
-				firstErr = fmt.Errorf("%s: %w", entry.Name, err)
+				firstErr = fmt.Errorf("%s: %w", res.name, res.err)
 			}
 			continue
 		}
-		if !ok {
+		if !res.ok {
 			continue
 		}
-
-		for _, affected := range advisory.Affected {
-			idx.byPackage[affected.Package] = append(idx.byPackage[affected.Package], advisory)
+		for _, affected := range res.advisory.Affected {
+			idx.byPackage[affected.Package] = append(idx.byPackage[affected.Package], res.advisory)
 		}
 		indexed++
+	}
+
+	// Loading a large ecosystem takes seconds; a cancelled scan or a
+	// shutting-down server should not keep its results.
+	if err := ctx.Err(); err != nil {
+		return indexed, skipped, err
 	}
 
 	// Every entry failing is corruption, not content. An archive of entirely
@@ -125,17 +185,43 @@ func loadArchive(ctx context.Context, path string, e model.Ecosystem, idx *Index
 }
 
 // decodeEntry reads and converts one advisory from the archive.
-func decodeEntry(entry *zip.File, e model.Ecosystem) (model.Advisory, bool, error) {
+//
+// buf is the caller's scratch space, reused across entries and not retained.
+func decodeEntry(entry *zip.File, e model.Ecosystem, buf *[]byte) (model.Advisory, bool, error) {
 	f, err := entry.Open()
 	if err != nil {
 		return model.Advisory{}, false, err
 	}
 	defer f.Close()
 
+	*buf = (*buf)[:0]
+	if err := readAll(f, buf); err != nil {
+		return model.Advisory{}, false, err
+	}
+
 	var raw osvAdvisory
-	if err := json.NewDecoder(f).Decode(&raw); err != nil {
+	if err := json.Unmarshal(*buf, &raw); err != nil {
 		return model.Advisory{}, false, err
 	}
 	advisory, ok := raw.toModel(e)
 	return advisory, ok, nil
+}
+
+// readAll appends everything r produces to buf.
+//
+// Not io.ReadAll, which allocates a fresh slice per call.
+func readAll(r io.Reader, buf *[]byte) error {
+	for {
+		if len(*buf) == cap(*buf) {
+			*buf = append(*buf, 0)[:len(*buf)]
+		}
+		n, err := r.Read((*buf)[len(*buf):cap(*buf)])
+		*buf = (*buf)[:len(*buf)+n]
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }

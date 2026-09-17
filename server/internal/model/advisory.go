@@ -1,6 +1,9 @@
 package model
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 // maliciousIDPrefix marks advisories from the OpenSSF malicious-packages feed.
 const maliciousIDPrefix = "MAL-"
@@ -133,13 +136,17 @@ func (a Advisory) URL() string {
 // Advisory-local: picking one version that clears every advisory on a package
 // needs ecosystem-aware ordering and belongs to the matcher.
 func (a Advisory) FixedVersionsFor(key PackageKey) []string {
+	// Deduplicated: an advisory often carries the same fix on several ranges —
+	// one per affected release line that was patched together — and "Fixed in
+	// 0.2.23 or 0.2.23" reads as a bug in the tool rather than a detail of the
+	// data.
 	var fixed []string
 	for _, affected := range a.Affected {
 		if affected.Package != key {
 			continue
 		}
 		for _, r := range affected.Ranges {
-			if r.Fixed != "" {
+			if r.Fixed != "" && !slices.Contains(fixed, r.Fixed) {
 				fixed = append(fixed, r.Fixed)
 			}
 		}

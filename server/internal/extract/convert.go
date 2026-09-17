@@ -4,24 +4,13 @@ import (
 	"path/filepath"
 	"sort"
 
-	cpb "github.com/google/osv-scalibr/binary/proto/config_go_proto"
 	"github.com/google/osv-scalibr/extractor"
-	"github.com/google/osv-scalibr/extractor/filesystem"
 	jsmeta "github.com/google/osv-scalibr/extractor/filesystem/language/javascript/packagejson/metadata"
 	reqmeta "github.com/google/osv-scalibr/extractor/filesystem/language/python/requirements"
 	"github.com/google/osv-scalibr/extractor/filesystem/osv"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
-
-// filesystemExtractor is the subset of scalibr's extractor interface every
-// constructor returns, named so buildPlugins can treat them uniformly.
-type filesystemExtractor = filesystem.Extractor
-
-// adapt lets constructors with the same shape be stored in one slice.
-func adapt(f func(*cpb.PluginConfig) (filesystem.Extractor, error)) func(*cpb.PluginConfig) (filesystemExtractor, error) {
-	return func(c *cpb.PluginConfig) (filesystemExtractor, error) { return f(c) }
-}
 
 // convert maps scalibr packages into model types, dropping what is not a real
 // dependency and reconciling manifest sightings against lockfile ones.

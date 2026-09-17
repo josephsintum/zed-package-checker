@@ -12,6 +12,7 @@ import (
 
 	scalibr "github.com/google/osv-scalibr"
 	cpb "github.com/google/osv-scalibr/binary/proto/config_go_proto"
+	"github.com/google/osv-scalibr/extractor/filesystem"
 	"github.com/google/osv-scalibr/extractor/filesystem/language/golang/gomod"
 	"github.com/google/osv-scalibr/extractor/filesystem/language/javascript/packagejson"
 	"github.com/google/osv-scalibr/extractor/filesystem/language/javascript/packagelockjson"
@@ -72,12 +73,12 @@ func New(opts ...Option) (*Extractor, error) {
 func buildPlugins(cfg *cpb.PluginConfig) ([]plugin.Plugin, error) {
 	constructors := []struct {
 		name string
-		new  func(*cpb.PluginConfig) (filesystemExtractor, error)
+		new  func(*cpb.PluginConfig) (filesystem.Extractor, error)
 	}{
-		{packagejson.Name, adapt(packagejson.New)},
-		{packagelockjson.Name, adapt(packagelockjson.New)},
-		{gomod.Name, adapt(gomod.New)},
-		{requirements.Name, adapt(requirements.New)},
+		{packagejson.Name, packagejson.New},
+		{packagelockjson.Name, packagelockjson.New},
+		{gomod.Name, gomod.New},
+		{requirements.Name, requirements.New},
 	}
 
 	plugins := make([]plugin.Plugin, 0, len(constructors))

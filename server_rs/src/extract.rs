@@ -62,6 +62,12 @@ impl Extractor {
             .collect();
 
         let mut sightings = Vec::new();
+        // The crate each Cargo project calls itself, so its lockfile's own
+        // [[package]] entry can be dropped. npm needs no equivalent: the
+        // manifest parser only reads dependency tables, so a project never
+        // names itself there. Cargo.lock lists every crate including the local
+        // one, and nothing in the entry marks it as local.
+        let mut cargo_self: HashMap<PathBuf, String> = HashMap::new();
         let mut files = 0usize;
 
         let walker = WalkBuilder::new(root)
@@ -96,9 +102,15 @@ impl Extractor {
                 // binary, or being written right now.
                 continue;
             };
+            if path.file_name().is_some_and(|n| n == "Cargo.toml")
+                && let Some(name) = manifest::cargo_self(&source)
+            {
+                cargo_self.insert(path.parent().unwrap_or(Path::new("")).to_path_buf(), name);
+            }
             sightings.extend(parse(&source, path));
         }
 
+        sightings.retain(|s| !is_own_crate(s, &cargo_self));
         Ok(reconcile(sightings))
     }
 }
@@ -111,11 +123,25 @@ fn parser_for(path: &Path) -> Option<Parser> {
         "package.json" => Some(manifest::package_json),
         "package-lock.json" | "npm-shrinkwrap.json" => Some(manifest::package_lock),
         "go.mod" => Some(manifest::go_mod),
+        "Cargo.toml" => Some(manifest::cargo_toml),
+        "Cargo.lock" => Some(manifest::cargo_lock),
         _ if name.starts_with("requirements") && name.ends_with(".txt") => {
             Some(manifest::requirements)
         }
         _ => None,
     }
+}
+
+/// Whether a sighting is the Cargo project's own crate.
+///
+/// A workspace root declares `[workspace]` and no `[package]`, so it records no
+/// name and nothing is dropped there.
+fn is_own_crate(sighting: &ExtractedPackage, cargo_self: &HashMap<PathBuf, String>) -> bool {
+    if sighting.package.ecosystem() != crate::model::Ecosystem::CratesIo {
+        return false;
+    }
+    let dir = sighting.evidence.path.parent().unwrap_or(Path::new(""));
+    cargo_self.get(dir).is_some_and(|own| *own == *sighting.package.name())
 }
 
 /// A package within one project directory.

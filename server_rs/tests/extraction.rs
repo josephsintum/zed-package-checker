@@ -104,6 +104,24 @@ fn a_lockfile_supersedes_the_range_in_the_manifest() {
 }
 
 #[test]
+fn cargo_reports_the_locked_version_and_keeps_the_declaration() {
+    assert_eq!(
+        extract("rust-cargo"),
+        ["crates.io:time@0.1.44 Cargo.lock 8 8-12 declared=Cargo.toml 6 0-4"]
+    );
+}
+
+#[test]
+fn a_crate_is_not_a_dependency_of_itself() {
+    // Cargo.lock lists every [[package]] including the local crate, and nothing
+    // in the entry says which one is local; the name comes from Cargo.toml.
+    assert!(
+        !extract("rust-cargo").iter().any(|p| p.contains("rust-cargo-fixture")),
+        "the project's own crate must not be reported"
+    );
+}
+
+#[test]
 fn requirements_get_exact_spans() {
     // The Go server anchors these on the whole line: `scan.locatorFor` returns
     // no locator for requirements.txt. Here the parser that finds the
@@ -130,10 +148,20 @@ fn a_project_is_not_a_dependency_of_itself() {
 
 #[test]
 fn every_fixture_yields_only_supported_ecosystems() {
-    for name in ["go-mod", "npm-direct", "npm-nolock", "npm-range-vs-lock", "py-requirements"] {
+    for name in [
+        "go-mod",
+        "npm-direct",
+        "npm-nolock",
+        "npm-range-vs-lock",
+        "py-requirements",
+        "rust-cargo",
+    ] {
         for p in Extractor::new().extract(&fixture(name)).unwrap() {
             assert!(
-                matches!(p.package.ecosystem(), Ecosystem::Npm | Ecosystem::Go | Ecosystem::PyPI),
+                matches!(
+                    p.package.ecosystem(),
+                    Ecosystem::Npm | Ecosystem::Go | Ecosystem::PyPI | Ecosystem::CratesIo
+                ),
                 "{name}: unexpected ecosystem for {}",
                 p.package
             );

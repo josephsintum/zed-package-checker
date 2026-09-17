@@ -5,15 +5,15 @@ the better choice for this?**
 
 It is a working language server, not a sketch. It walks a project, extracts its
 dependencies with spans, matches them against a local copy of the OSV database,
-and publishes diagnostics over LSP — and it produces byte-identical output to the
-Go server across the fixtures they share.
+and publishes diagnostics over LSP — and every diagnostic it publishes is
+byte-identical to the Go server's across the fixtures they share.
 
 The answer, with the measurements behind it, is in
 [`docs/RUST-VS-GO.md`](docs/RUST-VS-GO.md). The part of it worth shipping — the
 changes to make to the Go server, ranked and measured — is in
-[`docs/CARRY-BACK.md`](docs/CARRY-BACK.md). The two largest are implemented and
-committed on branch `db-parallel-load`; this branch deliberately leaves `server/`
-untouched, so `scripts/bench.sh` here measures the Go server as it was.
+[`docs/CARRY-BACK.md`](docs/CARRY-BACK.md). The two largest are merged into `main`
+(`ba15557`, `d8768b8`), so `scripts/bench.sh` now measures the improved Go
+loader, not the one the comparison started against.
 
 ## Layout
 
@@ -28,7 +28,7 @@ a test that walks imports; module privacy gives that for free.
 | `db.rs` | The advisory cache: download, lock, verify, publish atomically |
 | `osv.rs`, `load.rs`, `index.rs` | Archives to an in-memory index |
 | `matcher.rs` | Which advisories apply to which dependency |
-| `extract.rs`, `manifest.rs` | Walking a project, and the four manifest parsers |
+| `extract.rs`, `manifest.rs` | Walking a project, and the six manifest parsers |
 | `span.rs` | Byte offsets to editor positions |
 | `scan.rs` | Extraction + database + matching, composed |
 | `engine.rs` | Debounce, coalesce, supersede, publish |
@@ -87,7 +87,7 @@ The Rust side reports the same split from `dbcheck --sequential <ecosystem>`.
 
 ## What is not here
 
-Reachability analysis, the transitive npm graph, hover, code actions, `$/progress`
-download reporting, and enrichment. See the last section of the verdict for the
+Reachability analysis, the transitive npm graph, hover, code actions,
+`$/progress` download reporting, and enrichment. See the last section of the verdict for the
 full list and for the one behavioural gap deliberately carried over from the Go
 server rather than fixed.

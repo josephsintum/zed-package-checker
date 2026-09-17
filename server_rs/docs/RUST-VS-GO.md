@@ -83,7 +83,7 @@ written" is the loader at commit `189e893`: single-threaded, using the standard
 library's inflater. "Go, improved" is that loader after the changes this
 comparison suggested — parallel decoding, `klauspost/compress` registered as
 `archive/zip`'s decompressor, and the discarded `details` field removed — which
-are committed on branch `db-parallel-load`. See `docs/CARRY-BACK.md`.
+are merged into `main` as `ba15557` and `d8768b8`. See `docs/CARRY-BACK.md`.
 
 | Ecosystem | Implementation | Load | Retained | Peak RSS |
 |---|---|---:|---:|---:|
@@ -268,7 +268,7 @@ of it ran against real data.
 
 ## Extraction: the thing scalibr was supposed to make impossible
 
-Four parsers, 425 lines, in `src/manifest.rs`:
+Six parsers, 700 lines, in `src/manifest.rs`:
 
 | Manifest | How | Notes |
 |---|---|---|
@@ -276,6 +276,12 @@ Four parsers, 425 lines, in `src/manifest.rs`:
 | `package-lock.json` | `jsonc-parser` | Both the v1 `dependencies` tree and the v2/v3 `packages` map |
 | `go.mod` | hand-written, ~90 lines | `require` blocks and singles, the `go` directive, `// indirect` |
 | `requirements.txt` | hand-written, ~80 lines | Continuations, extras, environment markers, comparators |
+| `Cargo.toml` | hand-written, ~110 lines | Bare and inline-table forms, renamed crates, target tables |
+| `Cargo.lock` | hand-written, ~45 lines | `[[package]]` records, with the project's own crate dropped |
+
+Cargo is line-based rather than parsed for the same reason the Go locator is: a
+TOML decoder hands back values without telling you where they were written, and
+the position is the point.
 
 They are checked against the Go server's own fixtures, asserting the exact
 `(file, line, column)` of every dependency — `tests/extraction.rs` — and they
@@ -319,11 +325,19 @@ a range — and the end is exactly where the two were expected to differ.
 | `npm-direct` | identical, 1 diagnostic |
 | `npm-nolock` | identical, 1 diagnostic |
 | `npm-range-vs-lock` | identical, 1 diagnostic |
-| `py-requirements` | identical advisories and messages; spans narrower, as above |
+| `py-requirements` | identical, 3 diagnostics |
+| `rust-cargo` | identical, 1 diagnostic |
 
-Byte-identical output includes the summary diagnostic, the demotion rules, the
-"version inferred from a range" and Go-toolchain wording, and the anchoring of a
-lockfile finding onto its `package.json` declaration.
+**Every diagnostic matches**, and the list of accepted differences is empty.
+That includes the summary diagnostic, the demotion rules, the "version inferred
+from a range" and Go-toolchain wording, and the anchoring of a lockfile finding
+onto its manifest declaration.
+
+Getting there found one bug in each direction. The Go server's whole-line anchor
+on `requirements.txt` was closed on `main` while this was being written. The Rust
+server rendered "Fixed in 0.2.23 or 0.2.23" for a Cargo advisory carrying the
+same fix on two release lines — the same defect `8c6ece7` had just fixed in Go,
+reproduced faithfully because the port was faithful.
 
 ## End to end
 
@@ -343,8 +357,8 @@ remaining gap is real but no longer the difference between usable and not.
 
 | | Go | Rust |
 |---|---:|---:|
-| Non-test lines | 4,795 | 4,236 |
-| Test lines | 4,455 | 1,050 |
+| Non-test lines | 4,795 | 4,511 |
+| Test lines | 4,455 | 1,090 |
 | Source files | 56 across 9 packages | 21 in one flat crate |
 | Direct dependencies | 9 | 19 |
 | Transitive dependencies | 152 | 113 |
@@ -354,10 +368,9 @@ remaining gap is real but no longer the difference between usable and not.
 | Cross-compile, 6 targets | **92 s, no extra tooling** | see below |
 
 The line counts are not like for like and should not be read as "Rust is
-shorter". The Go server has `internal/locate` (640 lines) and `internal/arch`
-(156) with no counterpart here, and its test suite is far more thorough than
-what was written in a day. The honest reading is that the two are roughly the
-same size for the same behaviour.
+shorter". The Go server has `internal/locate` and `internal/arch` with no
+counterpart here, and its test suite is far more thorough. The honest reading is
+that the two are the same size for the same behaviour.
 
 The dependency numbers are the striking ones. Go's *nine* direct dependencies
 pull **152** indirect ones, almost entirely scalibr's container and OS-package

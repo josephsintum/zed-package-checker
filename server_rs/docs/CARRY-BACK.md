@@ -11,10 +11,9 @@ Reproduce with `server_rs/scripts/bench.sh`.
 
 ---
 
-## Tier 1 — landed on branch `db-parallel-load`
+## Tier 1 — merged into `main`
 
-Items 1–3 and item 5 are committed on **`db-parallel-load`**, branched from
-`main` at `bd009c9`:
+Items 1–3 and item 5 are on `main`:
 
 ```
 ba15557  Decode advisory archives in parallel with a faster inflater
@@ -33,12 +32,12 @@ of a performance patch.
 | | npm load | Peak RSS |
 |---|---:|---:|
 | `main` | 3,511 ms | 331 MiB |
-| `db-parallel-load` | **973 ms** | 467 MiB |
+| `main`, after `d8768b8` | **973 ms** | 467 MiB |
 | plus item 4 (measured only) | ~1,120 ms | **351 MiB** |
 
 End to end, time to first diagnostics, fastest of three:
 
-| Fixture | `main` | `db-parallel-load` |
+| Fixture | before (`bd009c9`) | after (`d8768b8`) |
 |---|---:|---:|
 | `npm-direct` | 4,580 ms | **2,061 ms** |
 | `go-mod` | 1,302 ms | **1,136 ms** |
@@ -133,7 +132,7 @@ is safe precisely because nothing reads it: `DB.Details` decodes into its own
 struct, and `TestToModelLeavesDetailsOutOfTheIndex` asserts on the model type,
 not the wire type.
 
-Measured on `db-parallel-load`, best of five: **1,014 ms → 973 ms**, a 4%
+Measured best of five: **1,014 ms → 973 ms**, a 4%
 improvement. That matches the prediction from the microbenchmark — 13% of parse,
 and parse is ~24% of the load — and is a reminder that a single run is noise: the
 first measurement of this change came out *slower*.
@@ -201,7 +200,7 @@ self-healing property without paying for it every time.
 
 ## Suggested order
 
-1. ~~Items 1–3~~ and ~~item 5~~ — done, on `db-parallel-load`. Review and merge.
+1. ~~Items 1–3~~ and ~~item 5~~ — merged (`ba15557`, `d8768b8`).
 2. **Item 4**, once you have decided where the limit comes from. It is a policy
    decision about memory and deserves its own argument in the commit message,
    not a line smuggled in with a speed patch.

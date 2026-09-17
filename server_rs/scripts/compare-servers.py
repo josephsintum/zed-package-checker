@@ -22,13 +22,10 @@ FIXTURES = ROOT / "server" / "testdata" / "fixtures"
 TIMEOUT = 180
 
 # Known and intended differences, with the reason. Anything not listed fails.
-EXPECTED = {
-    # `scan.locatorFor` has no locator for requirements.txt, so the Go server
-    # leaves Python findings on the whole-line anchor scalibr gave it. Here the
-    # parser that finds the dependency is the one that knows where it is, so the
-    # span covers the package name.
-    ("py-requirements", "requirements.txt"): "the Go server has no span locator for requirements.txt",
-}
+#
+# Empty, and worth keeping empty: the two servers currently agree on every
+# diagnostic across every fixture, down to the range and the message.
+EXPECTED: dict[tuple[str, str], str] = {}
 
 
 def drain(stream, sink):
@@ -152,7 +149,12 @@ def main():
             print("     rust:")
             print(show(rust.get(path)))
 
-    print("\nFAIL" if failures else "\nAGREE (modulo the intended differences above)")
+    if failures:
+        print("\nFAIL")
+    elif EXPECTED:
+        print("\nAGREE (modulo the intended differences above)")
+    else:
+        print("\nAGREE — every diagnostic identical")
     return 1 if failures else 0
 
 

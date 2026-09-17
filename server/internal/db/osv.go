@@ -14,13 +14,13 @@ import (
 // Deliberately partial: an advisory's JSON averages several kilobytes, most of
 // it prose, credits and provenance that never reaches a diagnostic. Decoding
 // only these fields is what keeps a parsed database small enough to hold in
-// memory.
+// memory, and a field left out here is skipped by the decoder rather than
+// allocated and discarded.
 type osvAdvisory struct {
 	ID        string   `json:"id"`
 	Withdrawn string   `json:"withdrawn"`
 	Aliases   []string `json:"aliases"`
 	Summary   string   `json:"summary"`
-	Details   string   `json:"details"`
 
 	Severity   []osvSeverity  `json:"severity"`
 	Affected   []osvAffected  `json:"affected"`
@@ -107,11 +107,10 @@ func (a *osvAdvisory) toModel(want model.Ecosystem) (model.Advisory, bool) {
 		ID:      a.ID,
 		Aliases: a.Aliases,
 		Summary: a.Summary,
-		// Details is deliberately left empty. It is full markdown prose,
-		// averaging 662 bytes, and across npm's 228k advisories accounts for
-		// 151 MB of a 257 MB index — more than half, to render hover text for
-		// the two or three advisories a project actually matches. DB.Details
-		// reads it from the archive on demand instead.
+		// Details is left empty, and is not a field above either: declaring it
+		// cost 1,947 bytes of allocation per advisory for a string this drops,
+		// about 445 MB across npm's archive. DB.Details reads it from the
+		// archive on demand instead.
 		CVSSScore:  score,
 		CVSSVector: vector,
 		Affected:   affected,

@@ -19,10 +19,10 @@ jobs:
     name: Language server
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The Go version comes from the module rather than being pinned twice.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
@@ -62,7 +62,7 @@ jobs:
     name: Extension shim
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rust-toolchain.toml pins the channel and the wasm32-wasip1 target, so
       # rustup installs both without this workflow naming either.

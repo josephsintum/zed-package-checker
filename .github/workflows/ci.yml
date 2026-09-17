@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the running job irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Language server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Go version comes from the module rather than being pinned twice.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Formatting
+        run: |
+          unformatted="$(gofmt -l server)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # Built from source, not downloaded. A golangci-lint compiled against an
+      # older Go refuses to run on a module with a newer `go` directive, and the
+      # Makefile used to report that refusal as "not installed" and exit zero —
+      # so the project went months believing it was linted when it was not.
+      # Building it here with the same toolchain the module declares makes that
+      # skew impossible.
+      - name: Install golangci-lint
+        run: make lint-tools
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      # The Stage 7 gate: the engine's concurrency, hammered.
+      - name: Hammer the concurrency tests
+        run: make test-race
+
+      - name: Build
+        run: make server
+
+  extension:
+    name: Extension shim
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and the wasm32-wasip1 target, so
+      # rustup installs both without this workflow naming either.
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Build the wasm shim
+        run: cargo build --release --target wasm32-wasip1

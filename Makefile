@@ -11,6 +11,10 @@ GO_LDFLAGS := -s -w -X main.version=$(VERSION)
 # this machine's Go. A package-manager build compiled with an older Go refuses
 # to run against a newer `go` directive, and on a typical PATH it would shadow
 # the working one.
+# Pinned so a new release cannot turn CI red on a day nobody touched the code.
+# Overridable: make lint-tools GOLANGCI_VERSION=v2.14.0
+GOLANGCI_VERSION ?= v2.13.2
+
 GOPATH_BIN := $(shell go env GOPATH)/bin
 GOLANGCI   := $(if $(wildcard $(GOPATH_BIN)/golangci-lint),$(GOPATH_BIN)/golangci-lint,golangci-lint)
 
@@ -58,7 +62,7 @@ lint: ## Vet the Go module and run golangci-lint
 	fi
 
 lint-tools: ## Install golangci-lint, built against this machine's Go
-	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 	@echo "installed to $$(go env GOPATH)/bin/golangci-lint"
 
 fmt: ## Format both languages

@@ -165,6 +165,14 @@ func (s *Scanner) Close() error {
 // failed scan on every trigger, and each of those must not start its own
 // download.
 func (s *Scanner) warmInBackground(ctx context.Context, ecosystems []model.Ecosystem) {
+	select {
+	case <-s.done:
+		// Closed. Adding to the WaitGroup after Wait has returned is undefined,
+		// and today only the order of main's deferred Closes prevents it.
+		return
+	default:
+	}
+
 	s.mu.Lock()
 	if s.warming {
 		s.mu.Unlock()

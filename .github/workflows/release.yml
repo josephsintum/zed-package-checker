@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Creating a release and uploading assets needs write access; nothing else here does.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Publish binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      # A tag can be pushed at any commit, including one CI never saw. Shipping
+      # binaries nobody tested is how a release path quietly rots, so the gates
+      # run here too rather than being assumed from main.
+      - name: Install golangci-lint
+        run: make lint-tools
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+      # Six targets from one runner, which CGO_ENABLED=0 makes possible.
+      # SHA256SUMS covers the binaries uncompressed, because that is what the
+      # shim has in hand after download_file decompresses them.
+      - name: Build every target
+        run: make release-binaries VERSION=${{ github.ref_name }}
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            server/dist/release/*

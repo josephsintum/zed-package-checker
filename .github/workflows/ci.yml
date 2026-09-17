@@ -69,5 +69,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      # Runs on the host, not wasm: these cover the checksum verification, which
+      # is the one piece of the shim that must not silently pass.
+      - name: Test
+        run: cargo test
+
       - name: Build the wasm shim
         run: cargo build --release --target wasm32-wasip1

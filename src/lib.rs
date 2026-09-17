@@ -48,7 +48,10 @@ impl zed::Extension for PackageCheckerExtension {
 ///   1. `binary.path` in the user's LSP settings — the override used during
 ///      development, and the escape hatch for a non-standard install.
 ///   2. `$PATH`, via the worktree's shell environment.
-fn resolve_binary(language_server_id: &LanguageServerId, worktree: &zed::Worktree) -> Result<String> {
+fn resolve_binary(
+    language_server_id: &LanguageServerId,
+    worktree: &zed::Worktree,
+) -> Result<String> {
     if let Ok(settings) = LspSettings::for_worktree(SERVER_ID, worktree) {
         if let Some(binary) = settings.binary {
             if let Some(path) = binary.path {

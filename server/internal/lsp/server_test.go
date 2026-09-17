@@ -336,11 +336,18 @@ func TestFindingDataRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(d.Data, &data); err != nil {
 		t.Fatalf("data is not valid JSON: %v", err)
 	}
-	for key, want := range map[string]any{
-		"ecosystem": "npm", "name": "lodash", "version": "4.17.15", "fixedVersion": "9.9.9",
-	} {
-		if got := data[key]; got != want {
-			t.Errorf("data[%q] = %v, want %v", key, got, want)
+	want := []struct {
+		key   string
+		value any
+	}{
+		{"ecosystem", "npm"},
+		{"name", "lodash"},
+		{"version", "4.17.15"},
+		{"fixedVersion", "9.9.9"},
+	}
+	for _, w := range want {
+		if got := data[w.key]; got != w.value {
+			t.Errorf("data[%q] = %v, want %v", w.key, got, w.value)
 		}
 	}
 }
@@ -429,20 +436,28 @@ func TestDidOpenRepublishesWithoutScanning(t *testing.T) {
 }
 
 func TestIsManifest(t *testing.T) {
-	for path, want := range map[string]bool{
-		"/p/package.json":         true,
-		"/p/package-lock.json":    true,
-		"/p/go.mod":               true,
-		"/p/go.sum":               true,
-		"/p/pyproject.toml":       true,
-		"/p/requirements.txt":     true,
-		"/p/requirements-dev.txt": true,
-		"/p/Cargo.lock":           true,
-		"/p/src/index.js":         false,
-		"/p/README.md":            false,
-		"/p/requirements.md":      false,
-		"/p/my-package.json.bak":  false,
-	} {
+	// A slice keeps the manifests together and the near-misses together, which
+	// is most of what this table is saying.
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/p/package.json", true},
+		{"/p/package-lock.json", true},
+		{"/p/go.mod", true},
+		{"/p/go.sum", true},
+		{"/p/pyproject.toml", true},
+		{"/p/requirements.txt", true},
+		{"/p/requirements-dev.txt", true},
+		{"/p/Cargo.lock", true},
+
+		{"/p/src/index.js", false},
+		{"/p/README.md", false},
+		{"/p/requirements.md", false},
+		{"/p/my-package.json.bak", false},
+	}
+	for _, tt := range tests {
+		path, want := tt.path, tt.want
 		t.Run(path, func(t *testing.T) {
 			if got := isManifest(path); got != want {
 				t.Errorf("isManifest(%q) = %v, want %v", path, got, want)

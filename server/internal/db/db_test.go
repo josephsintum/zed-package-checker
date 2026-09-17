@@ -469,13 +469,17 @@ func TestCRC32CFromHeader(t *testing.T) {
 
 func TestArchiveURLUsesEcosystemNameVerbatim(t *testing.T) {
 	// Normalising case or punctuation produces 404s.
-	tests := map[model.Ecosystem]string{
-		model.EcosystemNPM:    "/npm/all.zip",
-		model.EcosystemGo:     "/Go/all.zip",
-		model.EcosystemPyPI:   "/PyPI/all.zip",
-		model.EcosystemCrates: "/crates.io/all.zip",
+	tests := []struct {
+		ecosystem model.Ecosystem
+		suffix    string
+	}{
+		{model.EcosystemNPM, "/npm/all.zip"},
+		{model.EcosystemGo, "/Go/all.zip"},
+		{model.EcosystemPyPI, "/PyPI/all.zip"},
+		{model.EcosystemCrates, "/crates.io/all.zip"},
 	}
-	for e, suffix := range tests {
+	for _, tt := range tests {
+		e, suffix := tt.ecosystem, tt.suffix
 		t.Run(e.String(), func(t *testing.T) {
 			if got, want := archiveURL(e), archiveHost+suffix; got != want {
 				t.Errorf("archiveURL = %q, want %q", got, want)

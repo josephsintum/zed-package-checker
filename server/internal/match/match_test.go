@@ -124,16 +124,22 @@ func TestBackportedFixesAreDisjoint(t *testing.T) {
 		model.AffectedRange{Introduced: "2.0.0", Fixed: "2.0.5"},
 	)
 
-	tests := map[string]bool{
-		"1.0.0": true,  // inside the first range
-		"1.2.3": false, // fixed on the old line
-		"1.5.0": false, // past the old fix, before the second range opens
-		"2.0.0": true,  // inside the second range
-		"2.0.4": true,
-		"2.0.5": false, // fixed on the new line
-		"3.0.0": false,
+	// A slice, so the versions stay in timeline order and a failure reports the
+	// same cases in the same sequence on the next run.
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"1.0.0", true},  // inside the first range
+		{"1.2.3", false}, // fixed on the old line
+		{"1.5.0", false}, // past the old fix, before the second range opens
+		{"2.0.0", true},  // inside the second range
+		{"2.0.4", true},
+		{"2.0.5", false}, // fixed on the new line
+		{"3.0.0", false},
 	}
-	for version, want := range tests {
+	for _, tt := range tests {
+		version, want := tt.version, tt.want
 		t.Run(version, func(t *testing.T) {
 			got, err := affects(a, pkg(model.EcosystemNPM, "p", version))
 			if err != nil {
@@ -192,7 +198,16 @@ func TestExplicitVersionList(t *testing.T) {
 		Affected: []model.Affected{{Package: key, Versions: []string{"1.0.0", "1.2.0"}}},
 	}
 
-	for version, want := range map[string]bool{"1.0.0": true, "1.2.0": true, "1.1.0": false} {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"1.0.0", true},
+		{"1.2.0", true},
+		{"1.1.0", false},
+	}
+	for _, tt := range tests {
+		version, want := tt.version, tt.want
 		t.Run(version, func(t *testing.T) {
 			got, err := affects(a, model.Package{PackageKey: key, Version: version})
 			if err != nil {

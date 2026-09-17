@@ -18,7 +18,12 @@ GOLANGCI_VERSION ?= v2.13.2
 GOPATH_BIN := $(shell go env GOPATH)/bin
 GOLANGCI   := $(if $(wildcard $(GOPATH_BIN)/golangci-lint),$(GOPATH_BIN)/golangci-lint,golangci-lint)
 
-.PHONY: all server harness dbcheck scanharness extension test test-race test-differential lint lint-tools fmt tidy clean help
+# Every platform a release ships. Stage 0 confirmed all six cross-compile with
+# CGO_ENABLED=0, which is what makes building them on one runner possible.
+RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64
+RELEASE_DIR     := $(DIST)/release
+
+.PHONY: all server harness dbcheck scanharness extension release-binaries test test-race test-differential lint lint-tools fmt tidy clean help
 
 all: server extension ## Build both halves
 
@@ -41,6 +46,23 @@ scanharness: ## Build the phase-by-phase scan timer (development only)
 
 extension: ## Build the Zed extension shim to wasm
 	cargo build --release --target wasm32-wasip1
+
+release-binaries: ## Cross-compile every release target, with checksums
+	rm -rf $(RELEASE_DIR)
+	mkdir -p $(RELEASE_DIR)
+	@set -e; for target in $(RELEASE_TARGETS); do \
+		os=$${target%/*}; arch=$${target#*/}; \
+		name=$(BINARY)-$$os-$$arch; \
+		if [ "$$os" = "windows" ]; then name=$$name.exe; fi; \
+		echo "  $$name"; \
+		(cd $(SERVER_DIR) && GOOS=$$os GOARCH=$$arch CGO_ENABLED=0 go build -trimpath \
+			-ldflags "$(GO_LDFLAGS)" -o dist/release/$$name ./cmd/$(BINARY)); \
+	done
+	@# Checksums cover the binaries as they will be run, not as they are shipped:
+	@# the shim hashes what it has after decompressing, so this must match that.
+	cd $(RELEASE_DIR) && shasum -a 256 $(BINARY)-* > SHA256SUMS
+	cd $(RELEASE_DIR) && gzip -9 $(BINARY)-*
+	@echo "release artifacts in $(RELEASE_DIR)"
 
 test: ## Run Go tests with the race detector
 	cd $(SERVER_DIR) && go test -race ./...

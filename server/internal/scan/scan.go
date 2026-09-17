@@ -12,11 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/db"
+	"github.com/josephsintum/zed-package-checker/server/internal/locate"
 	"github.com/josephsintum/zed-package-checker/server/internal/match"
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
@@ -113,6 +116,7 @@ func (s *Scanner) Scan(ctx context.Context, root string) (model.Report, error) {
 	if err != nil {
 		return model.Report{}, fmt.Errorf("match: %w", err)
 	}
+	locateSpans(findings)
 
 	return model.Report{
 		Root:      root,
@@ -218,6 +222,41 @@ func (s *Scanner) warmInBackground(ctx context.Context, ecosystems []model.Ecosy
 		case <-warmCtx.Done():
 		}
 	})
+}
+
+// locateSpans narrows each finding from a whole line to the exact span of the
+// dependency's name, and records where its version is written.
+//
+// Best-effort throughout: extraction gives a line, which is already a usable
+// diagnostic. A manifest that has changed since the scan started, or one caught
+// mid-save, simply keeps that line rather than failing the scan over a squiggle
+// that would have been a little tidier.
+//
+// Each manifest is read at most once, however many of its dependencies are
+// vulnerable.
+func locateSpans(findings []model.Finding) {
+	parsed := map[string]map[string]model.Anchor{}
+
+	for i := range findings {
+		site := findings[i].AnchorSite()
+		if filepath.Base(site.Path) != "package.json" {
+			continue
+		}
+
+		anchors, read := parsed[site.Path]
+		if !read {
+			// Cached even when it fails, so an unreadable manifest is not
+			// re-read once per finding.
+			if src, err := os.ReadFile(site.Path); err == nil {
+				anchors = locate.PackageJSON(src, site.Path)
+			}
+			parsed[site.Path] = anchors
+		}
+
+		if anchor, ok := anchors[findings[i].Package.Name]; ok {
+			findings[i].Declared = &anchor
+		}
+	}
 }
 
 // NotReady reports whether err means the database is still downloading, rather

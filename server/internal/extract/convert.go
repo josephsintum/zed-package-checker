@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"path/filepath"
 	"sort"
 
 	cpb "github.com/google/osv-scalibr/binary/proto/config_go_proto"
@@ -69,7 +70,12 @@ func convert(pkgs []*extractor.Package) []model.ExtractedPackage {
 		if a.Package.Name != b.Package.Name {
 			return a.Package.Name < b.Package.Name
 		}
-		return a.Package.Version < b.Package.Version
+		if a.Package.Version != b.Package.Version {
+			return a.Package.Version < b.Package.Version
+		}
+		// Two projects may hold the same package at the same version, so the
+		// path is what makes this order total and the output reproducible.
+		return a.Evidence.Path < b.Evidence.Path
 	})
 	return out
 }
@@ -86,30 +92,38 @@ func convert(pkgs []*extractor.Package) []model.ExtractedPackage {
 //
 // The manifest's location survives as Declared, because that is the line the
 // user can actually edit.
+//
+// All of this is scoped to one project directory. A lockfile says nothing
+// about a manifest in a sibling project, and treating the two as one fact both
+// suppressed the sibling's dependency outright and anchored versions on the
+// wrong file — in a repository with two manifests naming the same package,
+// which is the ordinary case rather than a corner one.
 func reconcile(sightings []model.ExtractedPackage) []model.ExtractedPackage {
-	// Keyed by name alone: a lockfile legitimately holds several versions of
-	// one package, and all of those are kept.
-	locked := make(map[model.PackageKey]bool)
-	declared := make(map[model.PackageKey]model.Site)
+	// Keyed by name within a project: a lockfile legitimately holds several
+	// versions of one package, and all of those are kept.
+	locked := make(map[projectKey]bool)
+	declared := make(map[projectKey]model.Site)
 	for _, s := range sightings {
 		if s.FromRange {
-			if _, seen := declared[s.Package.PackageKey]; !seen {
-				declared[s.Package.PackageKey] = s.Evidence
+			if _, seen := declared[scopeOf(s)]; !seen {
+				declared[scopeOf(s)] = s.Evidence
 			}
 			continue
 		}
-		locked[s.Package.PackageKey] = true
+		locked[scopeOf(s)] = true
 	}
 
-	seen := make(map[model.Package]int, len(sightings))
+	seen := make(map[projectPackage]int, len(sightings))
 	out := make([]model.ExtractedPackage, 0, len(sightings))
 	for _, s := range sightings {
-		key := s.Package.PackageKey
+		key := scopeOf(s)
 		if s.FromRange && locked[key] {
-			// Superseded by the lockfile; its location is still used below.
+			// Superseded by this project's own lockfile; its location is still
+			// used below.
 			continue
 		}
-		if i, dup := seen[s.Package]; dup {
+		dedupe := projectPackage{dir: key.dir, pkg: s.Package}
+		if i, dup := seen[dedupe]; dup {
 			if len(out[i].DepGroups) == 0 {
 				out[i].DepGroups = s.DepGroups
 			}
@@ -118,10 +132,31 @@ func reconcile(sightings []model.ExtractedPackage) []model.ExtractedPackage {
 		if site, ok := declared[key]; ok && site != s.Evidence {
 			s.Declared = &site
 		}
-		seen[s.Package] = len(out)
+		seen[dedupe] = len(out)
 		out = append(out, s)
 	}
 	return out
+}
+
+// projectKey identifies a dependency by name within one project directory.
+type projectKey struct {
+	dir string
+	pkg model.PackageKey
+}
+
+// projectPackage identifies an exact version within one project directory, so
+// the same package at the same version in two projects stays two findings.
+type projectPackage struct {
+	dir string
+	pkg model.Package
+}
+
+// scopeOf locates a sighting's project. A manifest and the lockfile that
+// resolves it sit in the same directory, which is what makes this the seam.
+// Workspaces, where the lockfile is at the root and manifests are nested, need
+// the dependency graph and arrive with it.
+func scopeOf(s model.ExtractedPackage) projectKey {
+	return projectKey{dir: filepath.Dir(s.Evidence.Path), pkg: s.Package.PackageKey}
 }
 
 // isSelf reports whether the package is the manifest's own identity rather than

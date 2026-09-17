@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -255,5 +256,80 @@ func TestExtractKeepsMultipleLockedVersions(t *testing.T) {
 	})
 	if len(pkgs) != 2 {
 		t.Fatalf("got %d packages, want 2 distinct versions: %v", len(pkgs), pkgs)
+	}
+}
+
+// writeProject lays down one manifest-and-lockfile project under dir.
+func writeProject(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+}
+
+func TestReconciliationIsScopedToOneProject(t *testing.T) {
+	// Two projects in one tree, both depending on lodash: one pins it in a
+	// lockfile, the other has no lockfile at all. Reconciling them together
+	// used to drop the lockfile-free project entirely — a silent false
+	// negative — and anchor the locked version on the wrong manifest.
+	root := t.TempDir()
+
+	writeProject(t, filepath.Join(root, "locked"), map[string]string{
+		"package.json": `{"name":"locked","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}`,
+		"package-lock.json": `{"name":"locked","version":"1.0.0","lockfileVersion":3,"packages":{
+			"":{"name":"locked","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}},
+			"node_modules/lodash":{"version":"4.17.21"}}}`,
+	})
+	writeProject(t, filepath.Join(root, "unlocked"), map[string]string{
+		"package.json": `{"name":"unlocked","version":"1.0.0","dependencies":{"lodash":"^3.0.0"}}`,
+	})
+
+	e, err := New()
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := e.Extract(context.Background(), root)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+
+	byProject := map[string]model.ExtractedPackage{}
+	for _, p := range got {
+		byProject[filepath.Base(filepath.Dir(p.Evidence.Path))] = p
+	}
+
+	locked, ok := byProject["locked"]
+	if !ok {
+		t.Fatalf("the locked project produced no package; got %d overall", len(got))
+	}
+	if locked.Package.Version != "4.17.21" {
+		t.Errorf("locked project version = %q, want the lockfile's 4.17.21", locked.Package.Version)
+	}
+
+	unlocked, ok := byProject["unlocked"]
+	if !ok {
+		t.Fatal("the lockfile-free project produced no package: another project's lockfile suppressed it")
+	}
+	if !unlocked.FromRange {
+		t.Error("the lockfile-free project's version should be marked as inferred from a range")
+	}
+	if unlocked.Package.Version == "4.17.21" {
+		t.Error("the lockfile-free project took its version from another project's lockfile")
+	}
+
+	for _, p := range got {
+		declared := p.Evidence.Path
+		if p.Declared != nil {
+			declared = p.Declared.Path
+		}
+		if filepath.Dir(declared) != filepath.Dir(p.Evidence.Path) {
+			t.Errorf("%s is declared in %s but evidenced in %s: reconciliation crossed projects",
+				p.Package, filepath.Dir(declared), filepath.Dir(p.Evidence.Path))
+		}
 	}
 }

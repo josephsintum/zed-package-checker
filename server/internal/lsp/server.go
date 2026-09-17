@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"go.lsp.dev/protocol"
 	"go.lsp.dev/uri"
@@ -87,8 +88,11 @@ type Server struct {
 	// root is the workspace directory to scan, captured during Initialize.
 	root string
 
-	// posEncoding is the encoding negotiated during Initialize.
-	posEncoding protocol.PositionEncodingKind
+	// utf16Columns records the negotiated encoding. Set once during Initialize
+	// and read from the goroutines that publish, so it is atomic rather than
+	// plain: since locate started emitting exact columns this decides whether
+	// they are correct, where whole-line ranges never cared.
+	utf16Columns atomic.Bool
 
 	// ready closes once Initialize has set the root, so scheduling can start
 	// against the right directory rather than an empty one.
@@ -130,9 +134,17 @@ func (s *Server) Publish(ctx context.Context, path string, findings []model.Find
 	if !ok {
 		return fmt.Errorf("publish %s: no client on the context", path)
 	}
+	diagnostics := diagnosticsFor(path, findings)
+	if s.utf16Columns.Load() {
+		// locate counts columns in bytes. A client that did not offer UTF-8
+		// counts UTF-16 code units, and the two differ on any line with
+		// non-ASCII text before the dependency name.
+		toUTF16Columns(path, diagnostics)
+	}
+
 	err := client.PublishDiagnostics(ctx, &protocol.PublishDiagnosticsParams{
 		URI:         uri.File(path),
-		Diagnostics: diagnosticsFor(path, findings),
+		Diagnostics: diagnostics,
 	})
 	if err != nil {
 		return fmt.Errorf("publish %s: %w", path, err)
@@ -147,11 +159,12 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 	if s.root == "" {
 		return nil, fmt.Errorf("initialize: no workspace root in rootUri or workspaceFolders")
 	}
-	s.posEncoding = negotiatePositionEncoding(params)
+	encoding := negotiatePositionEncoding(params)
+	s.utf16Columns.Store(encoding == protocol.PositionEncodingKindUTF16)
 
 	s.log.Info("initialize",
 		"root", s.root,
-		"positionEncoding", string(s.posEncoding))
+		"positionEncoding", string(encoding))
 	s.readyOnce.Do(func() { close(s.ready) })
 
 	openClose := true
@@ -160,7 +173,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 
 	return &protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
-			PositionEncoding: s.posEncoding,
+			PositionEncoding: encoding,
 			// Manifests are read from disk, not from the buffer, so document
 			// contents are never needed: only open/close, to re-publish, and
 			// save, to rescan.

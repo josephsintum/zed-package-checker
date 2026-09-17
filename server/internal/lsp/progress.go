@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"go.lsp.dev/protocol"
 
@@ -28,6 +29,9 @@ type DownloadProgress struct {
 	tokens map[model.Ecosystem]protocol.ProgressToken
 }
 
+// createTimeout bounds the one blocking request this makes of the client.
+const createTimeout = 5 * time.Second
+
 // NewDownloadProgress builds a reporter. Safe for concurrent use.
 func NewDownloadProgress(log *slog.Logger) *DownloadProgress {
 	return &DownloadProgress{
@@ -46,8 +50,15 @@ func (p *DownloadProgress) Start(ctx context.Context, e model.Ecosystem, total i
 		return
 	}
 
+	// This is a request, not a notification: it blocks until the client
+	// answers. A client that advertises nothing and simply never replies would
+	// otherwise hold the download — and every ecosystem queued behind it — for
+	// the whole warm timeout. Progress is worth a moment, never a stall.
+	createCtx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
+
 	token := protocol.String("package-checker/db/" + e.String())
-	err := client.WorkDoneProgressCreate(ctx, &protocol.WorkDoneProgressCreateParams{Token: token})
+	err := client.WorkDoneProgressCreate(createCtx, &protocol.WorkDoneProgressCreateParams{Token: token})
 	if err != nil {
 		p.log.Debug("client refused a progress token",
 			"ecosystem", e.String(), "error", err)

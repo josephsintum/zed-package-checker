@@ -22,6 +22,15 @@ const VENDOR_DIR: &str = "osv-scalibr";
 /// How long a downloaded archive is trusted before it is checked again.
 /// Advisories are published continuously, but a day-old database is a
 /// reasonable trade against waking the network on every editor start.
+/// Smallest archive first, so the quick wins land while npm is still streaming.
+/// Sizes as published: crates.io 3 MB, Go 11 MB, PyPI 32 MB, npm 205 MB.
+const ARCHIVE_ORDER: [Ecosystem; 4] = [
+    Ecosystem::CratesIo,
+    Ecosystem::Go,
+    Ecosystem::PyPI,
+    Ecosystem::Npm,
+];
+
 const DEFAULT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Bounds how long we wait for another process already refreshing an ecosystem.
@@ -133,6 +142,18 @@ impl Database {
         ecosystems.iter().all(|&e| self.archive_path(e).exists())
     }
 
+    /// Which of the named ecosystems have an archive on disk.
+    ///
+    /// Each archive is published by an atomic rename, so one that is present is
+    /// complete and verified even while its siblings are still downloading.
+    pub fn ready_ecosystems(&self, ecosystems: &[Ecosystem]) -> Vec<Ecosystem> {
+        ecosystems
+            .iter()
+            .copied()
+            .filter(|&e| self.archive_path(e).exists())
+            .collect()
+    }
+
     /// The archives for the named ecosystems, ready to be handed to `load`.
     pub fn archives(&self, ecosystems: &[Ecosystem]) -> Vec<(Ecosystem, PathBuf)> {
         ecosystems
@@ -141,19 +162,53 @@ impl Database {
             .collect()
     }
 
-    /// Downloads or revalidates every named ecosystem.
-    pub fn ensure(&self, ecosystems: &[Ecosystem]) -> Result<(), DbError> {
-        let mut failures = Vec::new();
-        for &ecosystem in ecosystems {
-            if let Err(err) = self.ensure_one(ecosystem) {
-                failures.push(format!("{ecosystem}: {err}"));
+    /// Downloads or revalidates every named ecosystem, concurrently.
+    ///
+    /// `landed` is called with each ecosystem as its archive becomes readable,
+    /// so a scan can start on what is present rather than waiting for all of
+    /// them. Ordered smallest first: crates.io is 3 MB and npm is 205, and a
+    /// Rust project waiting on npm's archive before seeing its own findings was
+    /// the whole of the first-run problem.
+    pub fn ensure_each(
+        &self,
+        ecosystems: &[Ecosystem],
+        landed: impl Fn(Ecosystem) + Send + Sync,
+    ) -> Result<(), DbError> {
+        let mut ordered = ecosystems.to_vec();
+        ordered.sort_by_key(|e| {
+            ARCHIVE_ORDER
+                .iter()
+                .position(|o| o == e)
+                .unwrap_or(usize::MAX)
+        });
+
+        let failures = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for ecosystem in ordered {
+                let failures = &failures;
+                let landed = &landed;
+                scope.spawn(move || match self.ensure_one(ecosystem) {
+                    Ok(()) => landed(ecosystem),
+                    Err(err) => {
+                        if let Ok(mut failures) = failures.lock() {
+                            failures.push(format!("{ecosystem}: {err}"));
+                        }
+                    }
+                });
             }
-        }
+        });
+
+        let failures = failures.into_inner().unwrap_or_default();
         if failures.is_empty() {
             Ok(())
         } else {
             Err(DbError::NotReady(failures.join("; ")))
         }
+    }
+
+    /// Downloads or revalidates every named ecosystem.
+    pub fn ensure(&self, ecosystems: &[Ecosystem]) -> Result<(), DbError> {
+        self.ensure_each(ecosystems, |_| {})
     }
 
     fn ensure_one(&self, ecosystem: Ecosystem) -> Result<(), DbError> {

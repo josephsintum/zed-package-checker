@@ -171,6 +171,7 @@ async fn run(
     // One notice per condition rather than one per debounce.
     let mut announced = false;
     let mut pending = false;
+    let mut announced_partial = false;
 
     loop {
         // `sleep_until` on a deadline rather than a resettable timer: setting a
@@ -234,6 +235,21 @@ async fn run(
                                 "Checked {checked} {} against osv.dev — names and versions only. \
                                  Set online.enabled to false to use the offline database instead.",
                                 if checked == 1 { "dependency" } else { "dependencies" }
+                            ));
+                        }
+                        // An unchecked ecosystem produces a report that looks
+                        // exactly like a clean one. Say which, once.
+                        if let crate::model::Source::PartialArchive { missing } = &fresh.source
+                            && !announced_partial
+                        {
+                            announced_partial = true;
+                            publisher.notice(format!(
+                                "Not checked yet: {}. Still downloading those advisories.",
+                                missing
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         }
                         pending = false;

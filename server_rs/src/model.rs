@@ -542,11 +542,18 @@ pub struct Report {
 }
 
 /// Which advisory source answered a scan.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Source {
-    /// The downloaded archives. Nothing left the machine.
+    /// The downloaded archives, all of them. Nothing left the machine.
     #[default]
     Archive,
+    /// The archives, but some ecosystem's was still missing, so those
+    /// dependencies were not checked at all.
+    ///
+    /// Carried rather than logged because the report that results is
+    /// indistinguishable from a clean one, and an unchecked dependency
+    /// presented as clean is the failure this whole program exists to avoid.
+    PartialArchive { missing: Vec<Ecosystem> },
     /// osv.dev, carrying how many dependencies were asked about — which is what
     /// the user needs told, and is not the number of findings.
     Api { checked: usize },
@@ -567,6 +574,15 @@ impl Report {
     #[must_use]
     pub fn from_api(mut self, checked: usize) -> Self {
         self.source = Source::Api { checked };
+        self
+    }
+
+    /// Records that these ecosystems had no archive and were not checked.
+    #[must_use]
+    pub fn missing(mut self, missing: Vec<Ecosystem>) -> Self {
+        if !missing.is_empty() {
+            self.source = Source::PartialArchive { missing };
+        }
         self
     }
 

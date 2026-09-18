@@ -121,7 +121,13 @@ impl WorkspaceScanner {
         let on_ready = Arc::clone(&self.on_ready);
 
         std::thread::spawn(move || {
-            let result = database.ensure(&ecosystems);
+            let ready = Arc::clone(&on_ready);
+            let result = database.ensure_each(&ecosystems, move |ecosystem| {
+                // Published the moment it lands, so a Rust project is not
+                // waiting on npm's archive to see its own findings.
+                tracing::info!(%ecosystem, "advisory archive ready");
+                ready();
+            });
             // Cleared before anything else, so a failed download is retried on
             // the next scan rather than wedging the server.
             warming.store(false, Ordering::SeqCst);
@@ -189,6 +195,28 @@ impl Scanner for WorkspaceScanner {
             let index = self.index_for(&ecosystems)?;
             let findings = Matcher::new(&index).findings(&packages);
             return Ok(Report::new(root, findings));
+        }
+
+        // Some archives are here and the rest are still downloading. Each is
+        // published by an atomic rename, so what is present is complete —
+        // report it rather than showing nothing until npm's 205 MB lands.
+        let ready = self.database.ready_ecosystems(&ecosystems);
+        if !ready.is_empty() {
+            let missing: Vec<Ecosystem> = ecosystems
+                .iter()
+                .copied()
+                .filter(|e| !ready.contains(e))
+                .collect();
+            let index = self.index_for(&ready)?;
+            let checkable: Vec<_> = packages
+                .iter()
+                .filter(|p| ready.contains(&p.package.ecosystem()))
+                .cloned()
+                .collect();
+            let findings = Matcher::new(&index).findings(&checkable);
+
+            self.warm(ecosystems);
+            return Ok(Report::new(root, findings).missing(missing));
         }
 
         // Nothing on disk. Asking about the few hundred packages in hand beats

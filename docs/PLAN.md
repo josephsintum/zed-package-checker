@@ -723,6 +723,27 @@ dependency does and osv.dev has no advisories for private packages anyway. A one
 `window/showMessage` names what was sent, which is the consent step this class of tool
 usually omits.
 
+## Release blocker: remove the comparison language server
+
+`extension.toml` declares a second language server, `package-checker-go`, so both
+implementations can run side by side in one editor and be told apart — each
+passes `--label`, and the diagnostics panel distinguishes them by the `source`
+field rather than by the server's name.
+
+Zed starts every declared language server, so with no `binary.path` configured
+it reports a failure. That is acceptable scaffolding and unacceptable in a
+published extension: nobody installing this should see a server fail to start
+because of a comparison they never asked for.
+
+**Before publishing, delete the `[language_servers.package-checker-go]` block**
+and the `COMPARISON_SERVER_ID` branch in `src/lib.rs`. The `--label` flag on
+both servers can stay — it costs nothing and makes the comparison reproducible
+from the command line.
+
+Deliberately *not* resolved from `$PATH`: an older copy installed there produces
+differences that look like a real disagreement between the two servers and are
+not. Explicit configuration or nothing.
+
 ## Task: a setting for how much of a package's history to show
 
 *Raised 2026-09-18, from seeing this server and deps-lsp side by side in one panel.*

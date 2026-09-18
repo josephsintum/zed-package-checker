@@ -75,12 +75,17 @@ impl zed::Extension for PackageCheckerExtension {
         let path = if id == COMPARISON_SERVER_ID {
             args.push("--label".to_owned());
             args.push(COMPARISON_SERVER_ID.to_owned());
-            // Never downloaded: a comparison server with no binary configured
-            // is one the user did not ask for.
+            // Never downloaded, and never resolved from PATH: an older copy
+            // installed there would produce differences that look like a real
+            // disagreement between the two servers and are not.
             configured_binary(COMPARISON_SERVER_ID, worktree).ok_or_else(|| {
                 format!(
-                    "set lsp.{COMPARISON_SERVER_ID}.binary.path to run the comparison server, \
-                     or remove it from your settings"
+                    "The comparison server has no binary. It is development \
+                     scaffolding and is off unless you point it at one:\n\n  \
+                     \"lsp\": {{ \"{COMPARISON_SERVER_ID}\": {{ \"binary\": \
+                     {{ \"path\": \"/abs/path/to/server/dist/package-checker-lsp\" }} }} }}\n\n\
+                     Build it with `make server`. Delete that settings block to \
+                     silence this."
                 )
             })?
         } else {

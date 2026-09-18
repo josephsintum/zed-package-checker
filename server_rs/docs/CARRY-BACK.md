@@ -184,13 +184,16 @@ self-healing property without paying for it every time.
 
 ---
 
-## Tier 4 — correctness, found by auditing the diagnostic path
+## Tier 4 — correctness, found by auditing the diagnostic path — **taken**
 
 These are not about speed, and unlike Tiers 1–3 they change what a user reads.
-All four are implemented and tested in `server_rs/`; none is in `server/`. They
-are the reason `scripts/compare-servers.py` now carries six entries in its
-`EXPECTED` table instead of none — every one of those entries is the Rust server
-ahead of the Go one, not a disagreement about behaviour.
+All four were implemented and tested in `server_rs/` first and are now in
+`server/` as well, so `scripts/compare-servers.py` is back to an empty `EXPECTED`
+table and the six fixtures agree byte for byte.
+
+Go is no longer a port target after this tier: new work lands in `server_rs/`,
+which becomes the shipping server. `server/` stays in CI as the reference
+implementation and the differential oracle.
 
 ### 10. "Fixed in X" names a version that does not fix it
 

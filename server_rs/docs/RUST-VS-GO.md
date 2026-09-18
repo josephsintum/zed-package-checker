@@ -333,14 +333,16 @@ That includes the summary diagnostic, the demotion rules, the "version inferred
 from a range" and Go-toolchain wording, and the anchoring of a lockfile finding
 onto its manifest declaration.
 
-*That is no longer true, and deliberately so.* Auditing the diagnostic path
+*It briefly stopped being true, and is true again.* Auditing the diagnostic path
 afterwards found two defects both servers shared — "Fixed in X" naming the worst
 advisory's fix rather than a version that clears every advisory, and
-`Advisory::malicious()` reading the id but not the aliases — and they were fixed
-here first. `EXPECTED` in `scripts/compare-servers.py` now names six differences,
-every one of them this server ahead of the Go one rather than a disagreement
-about behaviour, and every one recorded in `docs/CARRY-BACK.md` Tier 4 for the Go
-server to take. The script still hard-fails on anything not listed.
+`Advisory::malicious()` reading the id but not the aliases — plus a third found
+in review here, a backported fix being offered as a downgrade. All were fixed in
+this server first and then carried into the Go one (`docs/CARRY-BACK.md` Tier 4),
+so `EXPECTED` is empty again and the six fixtures agree byte for byte.
+
+That round trip is the point of keeping two implementations: the corrected
+behaviour was written twice, independently, in two languages, and the two agree.
 
 Getting there found one bug in each direction. The Go server's whole-line anchor
 on `requirements.txt` was closed on `main` while this was being written. The Rust

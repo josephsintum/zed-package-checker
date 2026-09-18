@@ -24,37 +24,12 @@ TIMEOUT = 180
 # Known and intended differences in diagnostic *wording*, with the reason.
 # Anything not listed fails.
 #
-# Scoped to the message on purpose. Range, severity and code are compared with
-# no exceptions available, because every fixture below carries exactly one
-# findings-bearing file: a whitelist that covered the whole file would cover
-# every file the harness compares, and the gate could never fail again.
-#
-# Every entry is the Rust server ahead of the Go one, not a divergence the two
-# disagree about; each is recorded in docs/CARRY-BACK.md for the Go server to
-# take. The exact new wording is pinned by tests in src/diagnostics.rs, not here,
-# because these strings carry version numbers that move with the archive.
-VERIFIED_FIX = (
-    "Rust names the lowest version clearing every advisory, checked back against "
-    "the index; Go names the worst advisory's fix, which can leave the others "
-    "unresolved. CARRY-BACK item 3."
-)
-LOCKFILE_CLAUSE = (
-    "Rust says when a finding was resolved in a lockfile, so editing the manifest "
-    "alone will not clear it. CARRY-BACK item 4."
-)
-
-EXPECTED: dict[tuple[str, str], str] = {
-    # Both changes at once: a verified fix, and a lockfile-resolved version.
-    ("npm-direct", "package.json"): f"{VERIFIED_FIX} {LOCKFILE_CLAUSE}",
-    ("npm-range-vs-lock", "package.json"): LOCKFILE_CLAUSE,
-    ("rust-cargo", "Cargo.toml"): LOCKFILE_CLAUSE,
-    ("npm-nolock", "package.json"): VERIFIED_FIX,
-    ("py-requirements", "requirements.txt"): VERIFIED_FIX,
-    # Go suppresses "Fixed in" for a multi-advisory toolchain finding, because
-    # the worst advisory's fix clears almost none of the other 75. A verified
-    # fix does not have that problem, so Rust names one.
-    ("go-mod", "go.mod"): VERIFIED_FIX,
-}
+# Empty, and worth keeping empty: the two servers agree on every diagnostic
+# across every fixture, down to the range and the message. Scoped to wording
+# regardless of that — range, severity and code are compared with no exception
+# available, because every fixture carries exactly one findings-bearing file and
+# a whole-file whitelist would be a whitelist of everything.
+EXPECTED: dict[tuple[str, str], str] = {}
 
 
 def drain(stream, sink):

@@ -723,6 +723,24 @@ dependency does and osv.dev has no advisories for private packages anyway. A one
 `window/showMessage` names what was sent, which is the consent step this class of tool
 usually omits.
 
+## Never resolve an executable from the open worktree
+
+Briefly, the shim looked for `server_rs/target/release/package-checker-lsp`
+inside the worktree and ran it, so that working on this project needed no
+settings. That is arbitrary code execution: a language server runs against
+whatever folder the user opens, so any cloned repository shipping a file at that
+path would have been executed the moment the folder was opened — no build step,
+no prompt, nothing beyond opening it.
+
+It is the same hostile-clone threat model the server already takes seriously
+elsewhere (bounded manifest reads, validated advisory ids used as filenames),
+and the extension is a worse place to get it wrong, because the extension runs
+before any of the server's own guards do.
+
+**A binary path may come from the user's settings or their `PATH`, never from
+the project being inspected.** Both of those are things the user controls; the
+worktree is not.
+
 ## Release blocker: remove the comparison language server
 
 `extension.toml` declares a second language server, `package-checker-go`, so both

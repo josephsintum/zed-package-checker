@@ -9,40 +9,91 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    name: Publish binaries
+  # A tag can be pushed at any commit, including one CI never saw. Shipping
+  # binaries nobody tested is how a release path quietly rots, so the gates
+  # run here too rather than being assumed from main.
+  gate:
+    name: Lint and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
-
-      # A tag can be pushed at any commit, including one CI never saw. Shipping
-      # binaries nobody tested is how a release path quietly rots, so the gates
-      # run here too rather than being assumed from main.
-      - name: Install golangci-lint
-        run: make lint-tools
-
       - name: Lint
         run: make lint
-
       - name: Test
         run: make test
 
-      # Six targets from one runner, which CGO_ENABLED=0 makes possible.
-      # SHA256SUMS covers the binaries uncompressed, because that is what the
+  # One job per target. macOS and Windows build natively on their own runners;
+  # the Linux targets are musl, built with `cross` so the binaries carry no
+  # glibc floor. The names match what the shim's `asset_stem` asks for.
+  build:
+    name: Build ${{ matrix.target }}
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-latest }
+          - { target: x86_64-apple-darwin, os: macos-latest }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-latest, cross: true }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add the target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        shell: bash
+        working-directory: server
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
+
+      - name: Name the asset
+        shell: bash
+        run: |
+          mkdir -p assets
+          src=server/target/${{ matrix.target }}/release/package-checker-lsp
+          name=package-checker-lsp-${{ matrix.target }}
+          case "${{ matrix.target }}" in *windows*) src="$src.exe"; name="$name.exe";; esac
+          cp "$src" "assets/$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      # Checksums cover the binaries uncompressed, because that is what the
       # shim has in hand after download_file decompresses them.
-      - name: Build every target
-        run: make release-binaries VERSION=${{ github.ref_name }}
+      - name: Checksums and compression
+        working-directory: assets
+        run: |
+          shasum -a 256 package-checker-lsp-* > SHA256SUMS
+          gzip -9 package-checker-lsp-*
+          ls -l
 
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
             --title "${{ github.ref_name }}" \
             --generate-notes \
-            server/dist/release/*
+            assets/*

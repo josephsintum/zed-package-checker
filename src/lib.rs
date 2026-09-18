@@ -20,12 +20,6 @@ const BINARY_NAME: &str = "package-checker-lsp";
 /// not by the executable name, so the two must not be conflated.
 const SERVER_ID: &str = "package-checker";
 
-/// The comparison server, declared alongside the first so both can run at once.
-///
-/// It installs nothing: pointing it at a binary is the only way to start it,
-/// which keeps it inert for anyone who has not asked for it.
-const COMPARISON_SERVER_ID: &str = "package-checker-go";
-
 /// Where releases are published.
 const REPO: &str = "josephsintum/zed-package-checker";
 
@@ -34,7 +28,7 @@ const REPO: &str = "josephsintum/zed-package-checker";
 /// Pinned rather than "latest": an extension and the server it drives are
 /// released together, and a shim that silently picks up a newer server is a
 /// shim that can be broken by a release nobody tested it against.
-const SERVER_VERSION: &str = "v0.0.1";
+const SERVER_VERSION: &str = "v0.0.2";
 
 /// The checksum file published alongside the binaries.
 const SUMS_NAME: &str = "SHA256SUMS";
@@ -66,40 +60,12 @@ impl zed::Extension for PackageCheckerExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<Command> {
-        let id = language_server_id.as_ref();
-
-        // Two servers can run side by side, and the diagnostics panel tells
-        // them apart by the `source` field rather than by the server's name —
-        // so each is told what to call itself.
-        let mut args = vec!["--stdio".to_owned()];
-        let path = if id == COMPARISON_SERVER_ID {
-            args.push("--label".to_owned());
-            args.push(COMPARISON_SERVER_ID.to_owned());
-            // Never downloaded, and never resolved from PATH: an older copy
-            // installed there would produce differences that look like a real
-            // disagreement between the two servers and are not.
-            configured_binary(COMPARISON_SERVER_ID, worktree)
-                .or_else(|| worktree.which("package-checker-go"))
-                .ok_or_else(|| {
-                    format!(
-                        "The comparison server has no binary. It is development \
-                     scaffolding: build it with `make server` and either put \
-                     `package-checker-go` on your PATH or name it here:\n\n  \
-                     \"lsp\": {{ \"{COMPARISON_SERVER_ID}\": {{ \"binary\": \
-                     {{ \"path\": \"/abs/path/to/{GO_BUILD}\" }} }} }}\n\n\
-                     Deleting that settings block silences this."
-                    )
-                })?
-        } else {
-            resolve_binary(language_server_id, worktree)?
-        };
-
         Ok(Command {
-            command: path,
-            args,
-            // The server may shell out to language toolchains (`go` for
-            // reachability analysis). A GUI-launched Zed has a minimal PATH, so
-            // hand it the user's real shell environment.
+            command: resolve_binary(language_server_id, worktree)?,
+            args: vec!["--stdio".to_owned()],
+            // The server downloads advisories, so it should see the proxy and
+            // certificate settings the user's shell has. A GUI-launched Zed
+            // has a minimal environment of its own.
             env: worktree.shell_env(),
         })
     }
@@ -111,6 +77,12 @@ impl zed::Extension for PackageCheckerExtension {
 ///   1. `binary.path` in the user's LSP settings — the development override.
 ///   2. `$PATH`, for anyone who installed it deliberately.
 ///   3. A verified download from this repository's releases.
+///
+/// Deliberately *not* resolved by looking inside the worktree: a language
+/// server runs whatever folder the user opens, so executing a file found at a
+/// fixed path within it would let any cloned repository ship a binary and have
+/// it run on open. The path has to come from the user's own settings or their
+/// PATH, never from the project being inspected.
 fn resolve_binary(
     language_server_id: &LanguageServerId,
     worktree: &zed::Worktree,
@@ -139,23 +111,14 @@ fn configured_binary(server_id: &str, worktree: &zed::Worktree) -> Option<String
         .path
 }
 
-/// Where the Go server lands when built from source, for the error message.
-///
-/// Deliberately *not* resolved by looking inside the worktree: a language
-/// server runs whatever folder the user opens, so executing a file found at a
-/// fixed path within it would let any cloned repository ship a binary and have
-/// it run on open. The path has to come from the user's own settings or their
-/// PATH, never from the project being inspected.
-const GO_BUILD: &str = "server/dist/package-checker-lsp";
-
 /// Downloads the pinned release for this platform, unless it is already here.
 fn install(language_server_id: &LanguageServerId) -> Result<String> {
-    let binary = asset_stem();
+    let binary = asset_stem()?;
     let directory = SERVER_VERSION;
     let binary_path = format!("{directory}/{binary}");
 
     // An existing download is trusted: it was verified when it was installed,
-    // and re-hashing 46 MB on every editor start would be paid by everyone to
+    // and re-hashing it on every editor start would be paid by everyone to
     // catch something that does not happen.
     if fs::metadata(&binary_path).is_ok_and(|meta| meta.is_file()) {
         return Ok(binary_path);
@@ -231,7 +194,7 @@ fn published_sum(sums_path: &str, name: &str) -> Result<String> {
         .ok_or_else(|| format!("{SUMS_NAME} has no entry for {name}"))
 }
 
-/// Hashes a file in chunks, so a 46 MB binary is never held in memory at once.
+/// Hashes a file in chunks, so the binary is never held in memory at once.
 fn sha256(path: &str) -> Result<String> {
     let mut file = fs::File::open(path).map_err(|err| format!("could not open {path}: {err}"))?;
     let mut hasher = Sha256::new();
@@ -267,25 +230,30 @@ fn asset_url(release: &zed::GithubRelease, name: &str) -> Result<String> {
         .ok_or_else(|| format!("release {SERVER_VERSION} has no asset named {name}"))
 }
 
-/// The binary's name for this platform, matching what the release publishes.
-fn asset_stem() -> String {
+/// The binary's name for this platform: the executable name and the Rust
+/// target triple it was built for, matching what the release publishes.
+///
+/// Linux builds are musl, so one binary runs on any distribution; no 32-bit
+/// build is published because no supported platform needs one.
+fn asset_stem() -> Result<String> {
     let (os, arch) = zed::current_platform();
-    let os_name = match os {
-        Os::Mac => "darwin",
-        Os::Linux => "linux",
-        Os::Windows => "windows",
-    };
-    let arch_name = match arch {
-        Architecture::Aarch64 => "arm64",
-        Architecture::X8664 => "amd64",
-        Architecture::X86 => "386",
+    let triple = match (os, arch) {
+        (Os::Mac, Architecture::Aarch64) => "aarch64-apple-darwin",
+        (Os::Mac, Architecture::X8664) => "x86_64-apple-darwin",
+        (Os::Linux, Architecture::Aarch64) => "aarch64-unknown-linux-musl",
+        (Os::Linux, Architecture::X8664) => "x86_64-unknown-linux-musl",
+        (Os::Windows, Architecture::Aarch64) => "aarch64-pc-windows-msvc",
+        (Os::Windows, Architecture::X8664) => "x86_64-pc-windows-msvc",
+        (_, Architecture::X86) => {
+            return Err(format!("no 32-bit build of {BINARY_NAME} is published"));
+        }
     };
     let suffix = if matches!(os, Os::Windows) {
         ".exe"
     } else {
         ""
     };
-    format!("{BINARY_NAME}-{os_name}-{arch_name}{suffix}")
+    Ok(format!("{BINARY_NAME}-{triple}{suffix}"))
 }
 
 /// Deletes downloads for every version but the current one.
@@ -349,18 +317,21 @@ mod tests {
     fn published_sum_reads_the_named_entry() {
         let path = write_temp(
             "sums",
-            b"aaaa  package-checker-lsp-linux-amd64\nbbbb  package-checker-lsp-darwin-arm64\n",
+            b"aaaa  package-checker-lsp-x86_64-unknown-linux-musl\nbbbb  package-checker-lsp-aarch64-apple-darwin\n",
         );
         assert_eq!(
-            published_sum(&path, "package-checker-lsp-darwin-arm64").expect("entry"),
+            published_sum(&path, "package-checker-lsp-aarch64-apple-darwin").expect("entry"),
             "bbbb"
         );
     }
 
     #[test]
     fn published_sum_rejects_a_name_it_does_not_list() {
-        let path = write_temp("sums-missing", b"aaaa  package-checker-lsp-linux-amd64\n");
-        assert!(published_sum(&path, "package-checker-lsp-darwin-arm64").is_err());
+        let path = write_temp(
+            "sums-missing",
+            b"aaaa  package-checker-lsp-x86_64-unknown-linux-musl\n",
+        );
+        assert!(published_sum(&path, "package-checker-lsp-aarch64-apple-darwin").is_err());
     }
 
     #[test]

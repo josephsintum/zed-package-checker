@@ -32,28 +32,3 @@ languages = [
     "Rust",
 ]
 code_action_kinds = ["quickfix"]
-
-# A second server for side-by-side comparison during development. Zed keys a
-# server instance by worktree and server name, so declaring two runs two, and
-# their diagnostics merge in the panel. Each is told what to call itself with
-# --label, because the `source` field is what distinguishes them there.
-#
-# Nothing points at a binary by default: set
-# `lsp.package-checker-go.binary.path` to enable it. Absent that, Zed reports
-# it as failed to start and everything else carries on.
-[language_servers.package-checker-go]
-name = "Package Checker (Go)"
-languages = [
-    "JSON",
-    "JSONC",
-    "Go",
-    "Go Mod",
-    "Python",
-    "Plain Text",
-    "TOML",
-    "YAML",
-    "JavaScript",
-    "TypeScript",
-    "TSX",
-    "Rust",
-]

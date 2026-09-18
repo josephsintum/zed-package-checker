@@ -8,6 +8,7 @@ use package_checker::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::runtime::Handle;
 use tower_lsp_server::{LspService, Server};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -74,10 +75,12 @@ async fn main() {
         eprintln!("package-checker-lsp: no cache directory for this platform");
         std::process::exit(1);
     };
-    let database = Arc::new(Database::new(root));
-
     let (service, socket) = LspService::new(move |client| {
-        let database = Arc::clone(&database);
+        // Built here rather than above because progress needs the client, and
+        // the client does not exist until this closure runs.
+        let database = Arc::new(Database::new(root).with_progress(Box::new(
+            package_checker::ClientProgress::new(client.clone(), Handle::current()),
+        )));
         Backend::new(
             client,
             VERSION.to_owned(),

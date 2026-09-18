@@ -536,6 +536,20 @@ pub struct Report {
     pub root: PathBuf,
     pub findings: Vec<Finding>,
     pub scanned_at: SystemTime,
+    /// Where the advisories came from. The only caller that cares is the one
+    /// that has to tell the user when something left the machine.
+    pub source: Source,
+}
+
+/// Which advisory source answered a scan.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Source {
+    /// The downloaded archives. Nothing left the machine.
+    #[default]
+    Archive,
+    /// osv.dev, carrying how many dependencies were asked about — which is what
+    /// the user needs told, and is not the number of findings.
+    Api { checked: usize },
 }
 
 impl Report {
@@ -544,7 +558,16 @@ impl Report {
             root: root.into(),
             findings,
             scanned_at: SystemTime::now(),
+            source: Source::Archive,
         }
+    }
+
+    /// Records that this report was answered over the network, having asked
+    /// about `checked` dependencies.
+    #[must_use]
+    pub fn from_api(mut self, checked: usize) -> Self {
+        self.source = Source::Api { checked };
+        self
     }
 
     /// Findings grouped by the file their diagnostic is anchored on.

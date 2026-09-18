@@ -98,6 +98,16 @@ impl Publisher for ClientPublisher {
             client.publish_diagnostics(uri, rendered, None).await;
         });
     }
+
+    fn notice(&self, message: String) {
+        // Shown rather than logged: these are the two things a user cannot
+        // work out from an empty diagnostics panel — that something left the
+        // machine, and that nothing has been checked yet.
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            client.show_message(MessageType::INFO, message).await;
+        });
+    }
 }
 
 pub struct Backend {

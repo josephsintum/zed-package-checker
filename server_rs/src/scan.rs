@@ -166,7 +166,7 @@ impl WorkspaceScanner {
                 finding.fix = crate::model::Fix::None;
             }
         }
-        Ok(Report::new(root, findings))
+        Ok(Report::new(root, findings).from_api(packages.len()))
     }
 }
 

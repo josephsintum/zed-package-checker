@@ -163,6 +163,7 @@ def main() -> int:
     # anything the server does afterwards.
     published = []
     progress = []
+    notices = []
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         if not readable(proc.stdout, 0.5):
@@ -182,6 +183,11 @@ def main() -> int:
         if msg.get("method") == "$/progress":
             progress.append(msg["params"])
             continue
+        if msg.get("method") == "window/showMessage":
+            # What the user is told beyond the squiggles: that something left
+            # the machine, or that nothing has been checked yet.
+            notices.append(msg["params"])
+            continue
         if msg.get("method") == "textDocument/publishDiagnostics":
             published.append(msg["params"])
             if len(published) >= args.expect:
@@ -196,6 +202,9 @@ def main() -> int:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+    for notice in notices:
+        print(f"  notice: {notice.get('message', '')}")
 
     if progress:
         print(f"\n  $/progress ({len(progress)} notifications)")

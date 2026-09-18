@@ -51,6 +51,13 @@ pub trait Scanner: Send + Sync + 'static {
 /// Sends diagnostics to the client. Implemented by the LSP layer.
 pub trait Publisher: Send + Sync + 'static {
     fn publish(&self, path: PathBuf, findings: Vec<Finding>);
+
+    /// Something the user should know that is not a diagnostic.
+    ///
+    /// Default-empty so a test publisher need not care. Called rarely and at
+    /// most once per condition: an editor notification per debounce would be
+    /// worse than silence.
+    fn notice(&self, _message: String) {}
 }
 
 enum Message {
@@ -161,6 +168,9 @@ async fn run(
     let mut published: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<tokio::time::Instant> = None;
     let mut in_flight: Option<JoinHandle<anyhow::Result<Report>>> = None;
+    // One notice per condition rather than one per debounce.
+    let mut announced = false;
+    let mut pending = false;
 
     loop {
         // `sleep_until` on a deadline rather than a resettable timer: setting a
@@ -214,9 +224,31 @@ async fn run(
                 in_flight = None;
                 match finished {
                     Ok(Ok(fresh)) => {
+                        // Said once, the first time something leaves the
+                        // machine, rather than on every scan.
+                        if let crate::model::Source::Api { checked } = fresh.source
+                            && !announced
+                        {
+                            announced = true;
+                            publisher.notice(format!(
+                                "Checked {checked} {} against osv.dev — names and versions only. \
+                                 Set online.enabled to false to use the offline database instead.",
+                                if checked == 1 { "dependency" } else { "dependencies" }
+                            ));
+                        }
+                        pending = false;
                         publish(&fresh, &mut report, &mut published, publisher.as_ref());
                     }
-                    Ok(Err(error)) => tracing::warn!(%error, "scan failed"),
+                    Ok(Err(error)) => {
+                        // "Still downloading" and "nothing is wrong" must not
+                        // look alike, and an empty diagnostic set says the
+                        // second. Announced once per streak, not per debounce.
+                        if !pending {
+                            pending = true;
+                            publisher.notice(format!("Dependencies not checked yet: {error}"));
+                        }
+                        tracing::warn!(%error, "scan failed");
+                    }
                     // Cancelled by a newer request, which is the normal path.
                     Err(join) if join.is_cancelled() => {}
                     Err(join) => tracing::warn!(error = %join, "scan task failed"),

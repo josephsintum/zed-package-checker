@@ -433,3 +433,51 @@ func TestNilIndexIsSafe(t *testing.T) {
 		t.Error("a nil index reports non-zero counts")
 	}
 }
+
+func TestToModelDropsGitRanges(t *testing.T) {
+	// Shaped on PYSEC-2018-28, which carries both kinds for the same package:
+	// a commit hash and a version. 1,574 PyPI advisories look like this, and
+	// scalibr's comparator orders a hash rather than rejecting it.
+	body := `{"id":"PYSEC-2018-28","affected":[{"package":{"ecosystem":"PyPI","name":"requests"},
+		"ranges":[
+			{"type":"GIT","events":[{"introduced":"0"},{"fixed":"c45d7c49ea75133e52ab22a8e9e13173938e36ff"}]},
+			{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"2.20.0"}]}
+		]}]}`
+
+	got, ok := decode(t, body, model.EcosystemPyPI)
+	if !ok {
+		t.Fatal("advisory was not indexed")
+	}
+	ranges := got.Affected[0].Ranges
+	if len(ranges) != 1 {
+		t.Fatalf("got %d ranges, want 1: %+v", len(ranges), ranges)
+	}
+	if ranges[0].Fixed != "2.20.0" {
+		t.Errorf("Fixed = %q, want %q", ranges[0].Fixed, "2.20.0")
+	}
+
+	// The consequence that matters: a commit hash can never be named as a fix.
+	key := model.PackageKey{Ecosystem: model.EcosystemPyPI, Name: "requests"}
+	fixed := got.FixedVersionsFor(key)
+	if len(fixed) != 1 || fixed[0] != "2.20.0" {
+		t.Errorf("FixedVersionsFor() = %v, want [2.20.0]", fixed)
+	}
+}
+
+func TestToModelKeepsARangeWhoseTypeIsNotGit(t *testing.T) {
+	// Only GIT is dropped, so an absent or unrecognised type can never cost us
+	// an advisory.
+	for _, kind := range []string{"", "ECOSYSTEM", "SEMVER", "SOMETHING-NEW"} {
+		t.Run(kind, func(t *testing.T) {
+			body := `{"id":"GHSA-x","affected":[{"package":{"ecosystem":"npm","name":"p"},
+				"ranges":[{"type":"` + kind + `","events":[{"introduced":"0"},{"fixed":"1.0.0"}]}]}]}`
+			got, ok := decode(t, body, model.EcosystemNPM)
+			if !ok {
+				t.Fatal("advisory was not indexed")
+			}
+			if n := len(got.Affected[0].Ranges); n != 1 {
+				t.Errorf("got %d ranges, want 1", n)
+			}
+		})
+	}
+}

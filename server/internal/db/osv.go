@@ -49,8 +49,12 @@ type osvPackage struct {
 
 // osvRange is one version timeline for a package.
 type osvRange struct {
+	Type   string     `json:"type"`
 	Events []osvEvent `json:"events"`
 }
+
+// gitRange is a range whose bounds are commit hashes rather than versions.
+const gitRange = "GIT"
 
 // osvEvent is a single point on that timeline. A range is a sequence of these
 // rather than a pair of bounds, which is the shape flattenRanges resolves.
@@ -130,9 +134,18 @@ func (a *osvAdvisory) toModel(want model.Ecosystem) (model.Advisory, bool) {
 // advisory match versions it does not affect. It is stated here on its own
 // rather than nested inside the filtering toModel does, so that
 // TestToModelPairsRangeEvents has something to point at.
+//
+// GIT ranges are dropped: their bounds are forty hex characters, and scalibr's
+// comparator orders almost any string rather than rejecting one, so a commit
+// hash would be silently compared as a version and offered as a fix. Only that
+// type is dropped, so a range whose type is absent or unrecognised is still
+// indexed — this can lose a hash, never an advisory.
 func flattenRanges(ranges []osvRange) []model.AffectedRange {
 	var out []model.AffectedRange
 	for _, r := range ranges {
+		if r.Type == gitRange {
+			continue
+		}
 		var current model.AffectedRange
 		open := false
 

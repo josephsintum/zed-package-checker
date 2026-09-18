@@ -78,16 +78,19 @@ impl zed::Extension for PackageCheckerExtension {
             // Never downloaded, and never resolved from PATH: an older copy
             // installed there would produce differences that look like a real
             // disagreement between the two servers and are not.
-            configured_binary(COMPARISON_SERVER_ID, worktree).ok_or_else(|| {
-                format!(
-                    "The comparison server has no binary. It is development \
-                     scaffolding and is off unless you point it at one:\n\n  \
+            configured_binary(COMPARISON_SERVER_ID, worktree)
+                .or_else(|| repo_binary(worktree, GO_BUILD))
+                .ok_or_else(|| {
+                    format!(
+                        "The comparison server has no binary. It is development \
+                     scaffolding: it finds `{GO_BUILD}` on its own when this \
+                     repository is the open worktree, so run `make server` \
+                     there. Anywhere else, point it at one:\n\n  \
                      \"lsp\": {{ \"{COMPARISON_SERVER_ID}\": {{ \"binary\": \
-                     {{ \"path\": \"/abs/path/to/server/dist/package-checker-lsp\" }} }} }}\n\n\
-                     Build it with `make server`. Delete that settings block to \
-                     silence this."
-                )
-            })?
+                     {{ \"path\": \"/abs/path/to/{GO_BUILD}\" }} }} }}\n\n\
+                     Deleting that settings block silences this."
+                    )
+                })?
         } else {
             resolve_binary(language_server_id, worktree)?
         };
@@ -117,6 +120,13 @@ fn resolve_binary(
         return Ok(path);
     }
 
+    // Before $PATH, deliberately: a copy installed there is easily older than
+    // the tree you are editing, and a stale server masquerading as the one you
+    // just built is worse than no server at all.
+    if let Some(path) = repo_binary(worktree, RUST_BUILD) {
+        return Ok(path);
+    }
+
     if let Some(path) = worktree.which(BINARY_NAME) {
         return Ok(path);
     }
@@ -136,6 +146,24 @@ fn configured_binary(server_id: &str, worktree: &zed::Worktree) -> Option<String
         .binary?
         .path
 }
+
+/// A build sitting in the worktree, when the worktree is this project.
+///
+/// Working on the server and running it are the same act here, and the
+/// alternative is every contributor pasting an absolute path into their
+/// settings and then forgetting it is there. Scoped to a worktree that actually
+/// contains the build, so it can never pick up a stranger's binary.
+fn repo_binary(worktree: &zed::Worktree, relative: &str) -> Option<String> {
+    let path = format!("{}/{relative}", worktree.root_path());
+    fs::metadata(&path)
+        .ok()
+        .filter(std::fs::Metadata::is_file)
+        .map(|_| path)
+}
+
+/// Where each server lands when built from source in this repository.
+const RUST_BUILD: &str = "server_rs/target/release/package-checker-lsp";
+const GO_BUILD: &str = "server/dist/package-checker-lsp";
 
 /// Downloads the pinned release for this platform, unless it is already here.
 fn install(language_server_id: &LanguageServerId) -> Result<String> {

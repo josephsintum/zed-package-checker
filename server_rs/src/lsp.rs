@@ -1,18 +1,21 @@
 //! The LSP surface.
 //!
 //! Zed extensions cannot publish diagnostics — only a language server can — so
-//! this is the whole reason the server exists. It handles the six methods the
-//! Go server handles and nothing else; `tower-lsp-server` answers anything else
-//! with "method not found".
+//! this is the whole reason the server exists. It handles the lifecycle and
+//! synchronisation methods the Go server handles, plus `textDocument/codeAction`
+//! for the upgrade quick fix; `tower-lsp-server` answers anything else with
+//! "method not found".
 
+use crate::action;
 use crate::config::Config;
 use crate::diagnostics;
 use crate::engine::{Engine, Publisher, Reason, Requester};
 use crate::model::Finding;
 use crate::span::Encoding;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use arc_swap::ArcSwap;
 use tower_lsp_server::jsonrpc::Result;
@@ -122,6 +125,13 @@ pub struct Backend {
     /// same handle, so a change takes effect on the next scan with no restart.
     config: Arc<ArcSwap<Config>>,
     build: Box<BuildScanner>,
+    /// Open manifests, by path, as the editor has them — text and the version
+    /// the client last reported.
+    ///
+    /// Scanning still reads from disk; this exists only so a code action edits
+    /// the buffer the user is looking at. A span computed from disk against a
+    /// buffer with unsaved edits would rewrite the wrong bytes.
+    open: Mutex<HashMap<PathBuf, (i32, String)>>,
 }
 
 impl Backend {
@@ -143,11 +153,57 @@ impl Backend {
             utf16: Arc::new(AtomicBool::new(false)),
             config: Arc::new(ArcSwap::from_pointee(Config::default())),
             build: Box::new(build),
+            open: Mutex::new(HashMap::new()),
         }
     }
 
     fn engine(&self) -> Option<&Engine> {
         self.engine.get()
+    }
+
+    fn encoding(&self) -> Encoding {
+        if self.utf16.load(Ordering::Relaxed) {
+            Encoding::Utf16
+        } else {
+            Encoding::Utf8
+        }
+    }
+
+    /// A manifest's text as the editor has it, falling back to disk.
+    ///
+    /// The version is `Some` only for a tracked buffer, and rides on the edit
+    /// so a client that has moved on rejects it instead of applying it blind.
+    fn source(&self, path: &Path) -> Option<(Option<i32>, String)> {
+        if let Ok(open) = self.open.lock()
+            && let Some((version, text)) = open.get(path)
+        {
+            return Some((Some(*version), text.clone()));
+        }
+        crate::read::manifest(path).map(|text| (None, text))
+    }
+
+    /// Records an open manifest's text, ignoring anything over the read cap.
+    ///
+    /// Narrower than `is_manifest`: a `yarn.lock` changing is worth a rescan,
+    /// but no parser reads one, so holding its text would buy nothing.
+    fn track(&self, path: &Path, version: i32, text: String) {
+        let parseable = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::extract::is_manifest_name);
+        if !parseable {
+            return;
+        }
+        let Ok(mut open) = self.open.lock() else {
+            return;
+        };
+        if text.len() as u64 > crate::read::MAX_MANIFEST_BYTES {
+            // Too large to index: `LineIndex` offsets are `u32`. Forgetting it
+            // falls back to the disk read, which applies the same cap.
+            open.remove(path);
+            return;
+        }
+        open.insert(path.to_path_buf(), (version, text));
     }
 }
 
@@ -216,15 +272,26 @@ impl LanguageServer for Backend {
             offset_encoding: None,
             capabilities: ServerCapabilities {
                 position_encoding: Some(encoding),
-                // No document content is ever needed: manifests are read from
-                // disk, never from the buffer.
+                // Scanning reads manifests from disk. The buffer is tracked
+                // only so a quick fix edits what the user is looking at rather
+                // than what was last saved; `track` keeps anything but a
+                // manifest out of memory.
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::NONE),
+                        change: Some(TextDocumentSyncKind::FULL),
                         save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                             include_text: Some(false),
                         })),
+                        ..Default::default()
+                    },
+                )),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        // The edit is one parse of one already-open file, so
+                        // there is nothing worth deferring to a resolve.
+                        resolve_provider: Some(false),
                         ..Default::default()
                     },
                 )),
@@ -309,20 +376,62 @@ impl LanguageServer for Backend {
         let Some(path) = uri_to_path(&params.text_document.uri) else {
             return;
         };
+        self.track(
+            &path,
+            params.text_document.version,
+            params.text_document.text,
+        );
         let Some(engine) = self.engine() else { return };
         let findings = engine.findings(path.clone()).await;
         if findings.is_empty() {
             return;
         }
-        let encoding = if self.utf16.load(Ordering::Relaxed) {
-            Encoding::Utf16
-        } else {
-            Encoding::Utf8
-        };
         if let Some(uri) = diagnostics::file_uri(&path) {
-            let rendered = diagnostics::for_file(&path, &findings, encoding);
+            let rendered = diagnostics::for_file(&path, &findings, self.encoding());
             self.client.publish_diagnostics(uri, rendered, None).await;
         }
+    }
+
+    /// Full sync: the last change carries the whole document.
+    ///
+    /// No scan is triggered — a manifest mid-edit is usually not valid, and
+    /// `didSave` and the watcher already cover the real thing.
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let Some(path) = uri_to_path(&params.text_document.uri) else {
+            return;
+        };
+        let Some(change) = params.content_changes.into_iter().next_back() else {
+            return;
+        };
+        self.track(&path, params.text_document.version, change.text);
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) {
+        let Some(path) = uri_to_path(&params.text_document.uri) else {
+            return;
+        };
+        if let Ok(mut open) = self.open.lock() {
+            open.remove(&path);
+        }
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        let Some(path) = uri_to_path(&params.text_document.uri) else {
+            return Ok(None);
+        };
+        let Some(engine) = self.engine() else {
+            return Ok(None);
+        };
+        let findings = engine.findings(path.clone()).await;
+        if findings.is_empty() {
+            return Ok(None);
+        }
+        let Some((version, source)) = self.source(&path) else {
+            return Ok(None);
+        };
+        let actions =
+            action::upgrades(&path, &source, version, &findings, &params, self.encoding());
+        Ok((!actions.is_empty()).then_some(actions))
     }
 
     async fn shutdown(&self) -> Result<()> {

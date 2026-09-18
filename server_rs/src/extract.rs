@@ -158,7 +158,7 @@ pub fn is_manifest_name(name: &str) -> bool {
     parser_for_name(name).is_some()
 }
 
-fn parser_for(path: &Path) -> Option<manifest::Parser> {
+pub(crate) fn parser_for(path: &Path) -> Option<manifest::Parser> {
     parser_for_name(path.file_name()?.to_str()?)
 }
 

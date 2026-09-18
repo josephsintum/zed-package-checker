@@ -4,6 +4,7 @@
 //! same behaviour, same advisory archives, same fixtures, different language.
 //! `docs/RUST-VS-GO.md` holds what the comparison found.
 
+mod action;
 pub mod alloc;
 mod api;
 mod config;

@@ -598,33 +598,53 @@ Near-free: `x/mod/modfile` gives exact positions, and since Go 1.17 every module
 
 **Gate:** all three Python fixtures produce correct anchors.
 
-### Stage 14 — Hover, code actions, suppression
+### Stage 14 — The upgrade quick fix
 
-Full advisory markdown on hover. Two code actions:
-- **Upgrade**: minimum-safe = max of `fixed` events across advisories hitting the package, compared with `osv-scalibr/semantic` (public; handles npm semver, PEP 440, Go, Cargo), rewritten preserving the operator (`^4.17.15` → `^4.17.21`). Direct deps with a same-file version span only.
-- **Upgrade all**: applies every available version bump in one manifest, the equivalent
-  of gopls's "Upgrade All". With seventeen findings, one action per finding is where the
-  leverage is lost. Offered on the summary diagnostic rather than on individual findings,
-  and only for those with a same-file version span.
-- **Ignore this advisory**: appends to `osv-scanner.toml` at the worktree root and rescans. The mechanism is free — osv-scanner honours it via `ConfigOverridePath`, and the schema (verified in `internal/config/config.go:16-49`) is richer than just an ID list:
+*Done, in `server_rs` only. Rewritten 2026-09-18 to record what was built.*
 
-```go
-type IgnoreEntry struct {
-    ID          string    `toml:"id"`
-    IgnoreUntil time.Time `toml:"ignoreUntil"`   // snooze, not just suppress
-    Reason      string    `toml:"reason"`
-}
-type PackageOverrideEntry struct {
-    Name        string `toml:"name"`
-    NameIsRegex bool   `toml:"nameIsRegex"`
-    Ignore      bool   `toml:"ignore"`
-    // + Version, Ecosystem, Group, EffectiveUntil, Reason
-}
-```
+A quick fix on every finding whose `Fix` is `Clears`: it rewrites the version in the
+manifest, preserving whatever surrounds it.
 
-So three actions fall out almost for free, mirroring JetBrains' `IgnoreReason`/`excludeList`: **ignore this advisory**, **snooze it for 30 days** (`ignoreUntil`), and **ignore this package entirely** (`PackageOverrides`, which also supports regex and dev-group scoping). `Config.UnusedIgnoredVulns()` additionally lets us surface ignore entries that no longer match anything — worth a diagnostic on the toml itself so suppressions don't rot silently.
+The plan as written assumed the version span would have to be carried from the parsers
+through `reconcile` into the `Finding`. It does not, and doing so would have been lossy —
+`reconcile` keeps only the name span, and drops the manifest sighting outright once a
+lockfile supersedes it. Instead `action.rs` re-parses the one file the action is offered
+on. Parsers are pure and cost microseconds, so the span only has to exist at the moment
+the edit is built, and nothing upstream changed.
 
-**Gate:** applying the upgrade in Zed produces a valid manifest and the diagnostic clears on rescan; applying ignore clears it and the toml is well-formed; an expired `ignoreUntil` brings the diagnostic back.
+- **The span covers the digits alone**, never the operator, so `>=1.0.0 <2.0.0` becomes
+  `>=1.4.0 <2.0.0` rather than losing its upper bound, and `v1.6.0` in a `go.mod` keeps
+  its `v`. No operator is ever reconstructed, which is what the original plan would have
+  required.
+- **Lockfiles are never rewritten** — that would mean rewriting integrity hashes and
+  resolved URLs — so `package_lock` and `cargo_lock` record no span. Where a lockfile
+  pinned the version the action still edits the manifest, and says so in its title:
+  *"Update lodash to 4.18.0 in package.json (lockfile not updated)"*.
+- **Open manifests are now tracked** (`textDocumentSync.change` went from `NONE` to
+  `FULL`) so the span is computed from the buffer rather than from disk. A stale
+  diagnostic is a squiggle in the wrong place; a stale *edit* rewrites the wrong bytes in
+  a file the user is editing. The edit also carries the document version, so a client
+  that has moved on rejects it.
+- **Findings are correlated by advisory id**, not by position, wherever the client sends
+  `context.diagnostics` — which is what that field is for, and the only correlation that
+  survives an edited buffer.
+
+**Split out of this stage and still open:**
+
+- **Hover** with full advisory prose. Worth doing now that the per-package API cache
+  holds `details`; the old objection — reading it meant touching the 205 MB archive —
+  no longer applies.
+- **Upgrade all** on the summary diagnostic, gopls-style. Same machinery, one extra
+  branch.
+- **Suppression.** The `osv-scanner.toml` premise here is dead: no `osv-scanner`
+  dependency remains, so none of that schema is free any more. It needs a project config
+  mechanism that does not exist, and a harder problem behind it — suppressing one
+  advisory of several would need `Fix` recomputed, and by then the index the matcher
+  borrowed has been dropped. A restructure, not a feature.
+
+**Gate:** met. 143 Rust tests, including a round trip that applies the produced edit and
+re-parses the result; and all six fixtures driven over real stdio LSP, each producing a
+valid manifest at the fixed version with everything around it untouched.
 
 ### Stage 15 — Enrichment
 

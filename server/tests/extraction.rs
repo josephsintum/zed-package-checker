@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../server/testdata/fixtures")
+        .join("testdata/fixtures")
         .join(name)
 }
 

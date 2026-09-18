@@ -1,53 +1,31 @@
 #!/usr/bin/env python3
-"""Diff what the two servers publish, over the fixtures they share.
+"""Diff what the server publishes from each of its two advisory sources.
 
-Both are language servers, so the honest comparison is the wire output. This
-drives each binary over stdio itself rather than reusing `scripts/lsp-smoke.py`,
-which prints only the start of a range — and the end is exactly where the two
-implementations were expected to differ.
+The archive holds every advisory for every package; the API path fetches only
+the ones this project's dependencies need. They are meant to be
+indistinguishable from the outside, and this is what says so: same binary, same
+fixtures, one run against a populated archive and one against an empty cache
+that forces the network path.
 
-Compared per diagnostic: the full range, the severity, the code, and the message.
+Drives the binary over stdio itself rather than reusing `scripts/lsp-smoke.py`,
+which prints only the start of a range. Compared per diagnostic: the full range,
+the severity, the code, and the message.
+
+Requires the real archive to be present — run `dbcheck --fetch` first.
 """
 
 import json
 import pathlib
 import subprocess
 import sys
+import tempfile
 import threading
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-GO = ROOT / "server" / "dist" / "package-checker-lsp"
-RUST = ROOT / "server_rs" / "target" / "release" / "package-checker-lsp"
+SERVER = ROOT / "server" / "target" / "release" / "package-checker-lsp"
 FIXTURES = ROOT / "server" / "testdata" / "fixtures"
+ARCHIVE_DB = pathlib.Path.home() / "Library" / "Caches" / "zed-package-checker" / "db"
 TIMEOUT = 180
-
-# Known and intended differences in diagnostic *wording*, with the reason.
-# Anything not listed fails.
-#
-# Scoped to wording regardless of what is listed — range, severity and code are
-# compared with no exception available, because every fixture carries exactly
-# one findings-bearing file and a whole-file whitelist would be a whitelist of
-# everything.
-#
-# The list stopped being empty on 2026-09-18, when the Rust server gained the
-# upgrade quick fix. Its message ends by naming the key that applies the fix;
-# the Go server has no code actions, so the same sentence there would point at
-# a key that does nothing. This is the first deliberate divergence between the
-# two, and it is one-directional: the Rust message is the Go message plus a
-# trailing clause. Everything before that clause must still match exactly,
-# which is what keeps this from becoming a licence to drift.
-_QUICK_FIX = "rust names the key that applies its upgrade quick fix; go has no code actions"
-
-# Named one by one rather than matched by pattern: a new fixture must fail
-# before it is whitelisted, not inherit an exemption.
-EXPECTED: dict[tuple[str, str], str] = {
-    ("go-mod", "go.mod"): _QUICK_FIX,
-    ("npm-direct", "package.json"): _QUICK_FIX,
-    ("npm-nolock", "package.json"): _QUICK_FIX,
-    ("npm-range-vs-lock", "package.json"): _QUICK_FIX,
-    ("py-requirements", "requirements.txt"): _QUICK_FIX,
-    ("rust-cargo", "Cargo.toml"): _QUICK_FIX,
-}
 
 
 def drain(stream, sink):
@@ -81,8 +59,8 @@ def publish(binary, root, db_root=None):
     """Every diagnostic the server publishes for one fixture, keyed by file.
 
     `db_root` points the server at a specific advisory cache — an empty one
-    exercises the cold path, which is how compare-sources.py tells the archive
-    and the API apart.
+    exercises the cold path, which is how the archive and the API are told
+    apart.
     """
     proc = subprocess.Popen(
         [str(binary), "--stdio"] + (["--db-root", str(db_root)] if db_root else []),
@@ -98,7 +76,7 @@ def publish(binary, root, db_root=None):
             "processId": None,
             "rootUri": uri,
             "workspaceFolders": [{"uri": uri, "name": root.name}],
-            # Ask for utf-8 so both servers emit byte columns and the comparison
+            # Ask for utf-8 so the server emits byte columns and the comparison
             # is not measuring an encoding conversion.
             "capabilities": {"general": {"positionEncodings": ["utf-8", "utf-16"]}},
         },
@@ -146,15 +124,6 @@ def publish(binary, root, db_root=None):
     return out
 
 
-def structure(entries):
-    """Everything but the message: range, severity, code."""
-    return None if entries is None else [e[:6] for e in entries]
-
-
-def wording(entries):
-    return None if entries is None else [e[6] for e in entries]
-
-
 def show(entries):
     if entries is None:
         return "    (nothing published)"
@@ -164,41 +133,34 @@ def show(entries):
     )
 
 
-def main():
+def main() -> int:
+    if not ARCHIVE_DB.is_dir():
+        print(f"no advisory archive at {ARCHIVE_DB}; run dbcheck --fetch first")
+        return 2
+    if not SERVER.is_file():
+        print(f"no server binary at {SERVER}; run `make server` first")
+        return 2
+
     failures = 0
     for fixture in sorted(p for p in FIXTURES.iterdir() if p.is_dir()):
-        go = publish(GO, fixture)
-        rust = publish(RUST, fixture)
+        archive = publish(SERVER, fixture, ARCHIVE_DB)
+        # A fresh directory every time: a warm API cache would prove nothing.
+        with tempfile.TemporaryDirectory() as empty:
+            api = publish(SERVER, fixture, empty)
+
         print(f"== {fixture.name}")
-
-        for path in sorted(set(go) | set(rust)):
-            expected = EXPECTED.get((fixture.name, path))
-            if go.get(path) == rust.get(path):
-                print(f"   {path}: identical ({len(go.get(path, []))} diagnostics)")
+        for path in sorted(set(archive) | set(api)):
+            if archive.get(path) == api.get(path):
+                print(f"   {path}: identical ({len(archive.get(path, []))} diagnostics)")
                 continue
+            failures += 1
+            print(f"   {path}: DIFFERS")
+            print("     archive:")
+            print(show(archive.get(path)))
+            print("     api:")
+            print(show(api.get(path)))
 
-            # Position, severity and code are not whitelistable. A difference
-            # here is a real divergence however the messages read.
-            if structure(go.get(path)) != structure(rust.get(path)):
-                failures += 1
-                label = "DIFFERS (range/severity/code)"
-            elif expected:
-                label = f"wording differs as expected — {expected}"
-            else:
-                failures += 1
-                label = "DIFFERS (wording)"
-            print(f"   {path}: {label}")
-            print("     go:")
-            print(show(go.get(path)))
-            print("     rust:")
-            print(show(rust.get(path)))
-
-    if failures:
-        print("\nFAIL")
-    elif EXPECTED:
-        print("\nAGREE on range, severity and code; wording differs only as listed")
-    else:
-        print("\nAGREE — every diagnostic identical")
+    print("\nFAIL" if failures else "\nAGREE — both sources produce identical diagnostics")
     return 1 if failures else 0
 
 

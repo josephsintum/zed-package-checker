@@ -1,6 +1,0 @@
-target/
-
-# Generated from the advisory archives on disk by tools/semantic-oracle, and
-# 4 MB of it. tests/differential.rs prints the command to rebuild it and skips
-# cleanly when it is absent.
-tests/corpus/

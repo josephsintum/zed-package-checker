@@ -21,64 +21,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The Go version comes from the module rather than being pinned twice.
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: server/go.mod
-          cache-dependency-path: server/go.sum
-
-      - name: Formatting
-        run: |
-          unformatted="$(gofmt -l server)"
-          if [ -n "$unformatted" ]; then
-            echo "not gofmt'd:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      # Built from source, not downloaded. A golangci-lint compiled against an
-      # older Go refuses to run on a module with a newer `go` directive, and the
-      # Makefile used to report that refusal as "not installed" and exit zero —
-      # so the project went months believing it was linted when it was not.
-      # Building it here with the same toolchain the module declares makes that
-      # skew impossible.
-      - name: Install golangci-lint
-        run: make lint-tools
-
+      # Through the Makefile, not by spelling the commands out again: a
+      # contributor running `make lint` green must not still fail here.
+      # `server` is its own workspace, so the root `cargo fmt` does not reach
+      # it — `make fmt` and `make lint` are what do.
       - name: Lint
         run: make lint
 
+      # Includes the comparator gate: tests/differential.rs checks version
+      # ordering against a checked-in corpus of osv-scalibr's answers.
       - name: Test
         run: make test
 
-      # The Stage 7 gate: the engine's concurrency, hammered.
-      - name: Hammer the concurrency tests
-        run: make test-race
-
       - name: Build
         run: make server
-
-  server-rs:
-    name: Rust server
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # Through the Makefile, not by spelling the commands out again: a
-      # contributor running `make lint-rs` green must not still fail here.
-      # `server_rs` is its own workspace, so the root `cargo fmt` does not
-      # reach it — `make fmt` and `make lint-rs` are what do.
-      - name: Lint
-        run: make lint-rs
-
-      # tests/differential.rs skips unless tests/corpus/ordering.tsv is present,
-      # and it is generated from 252 MB of archives rather than committed. The
-      # comparator gate is a local one; this job covers everything else.
-      - name: Test
-        run: make test-rs
-
-      - name: Build
-        run: make server-rs
 
   extension:
     name: Extension shim

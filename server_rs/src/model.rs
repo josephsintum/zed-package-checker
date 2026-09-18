@@ -364,9 +364,15 @@ pub struct Advisory {
 impl Advisory {
     /// Whether the package is malicious rather than vulnerable.
     ///
-    /// Derived from the identifier so it cannot drift from the feed.
+    /// Reads the aliases as well as the id: OSV files some confirmed-malicious
+    /// events under a `GHSA-` id, naming the canonical `MAL-` one only as an
+    /// alias. Not `related`, which means "see also".
     pub fn malicious(&self) -> bool {
         self.id.starts_with(MALICIOUS_ID_PREFIX)
+            || self
+                .aliases
+                .iter()
+                .any(|alias| alias.starts_with(MALICIOUS_ID_PREFIX))
     }
 
     /// The qualitative severity.
@@ -448,6 +454,25 @@ pub struct Finding {
     pub reachable: Option<bool>,
     pub from_range: bool,
     pub dep_groups: Vec<String>,
+    /// Decided by the matcher, where the index is borrowed. Nothing downstream
+    /// of it holds one.
+    pub fix: Fix,
+}
+
+/// What to upgrade to.
+///
+/// Three cases rather than an `Option`, because "nothing is published" and
+/// "things are published but none of them is enough" are different answers and
+/// a user acts differently on each.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum Fix {
+    /// The lowest published version no advisory on this package still affects.
+    Clears(Box<str>),
+    /// Fixes are published, but no single one clears every advisory.
+    Partial,
+    /// No advisory on this package names a fixed version.
+    #[default]
+    None,
 }
 
 impl Finding {

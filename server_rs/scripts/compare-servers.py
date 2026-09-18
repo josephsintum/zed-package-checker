@@ -21,11 +21,40 @@ RUST = ROOT / "server_rs" / "target" / "release" / "package-checker-lsp"
 FIXTURES = ROOT / "server" / "testdata" / "fixtures"
 TIMEOUT = 180
 
-# Known and intended differences, with the reason. Anything not listed fails.
+# Known and intended differences in diagnostic *wording*, with the reason.
+# Anything not listed fails.
 #
-# Empty, and worth keeping empty: the two servers currently agree on every
-# diagnostic across every fixture, down to the range and the message.
-EXPECTED: dict[tuple[str, str], str] = {}
+# Scoped to the message on purpose. Range, severity and code are compared with
+# no exceptions available, because every fixture below carries exactly one
+# findings-bearing file: a whitelist that covered the whole file would cover
+# every file the harness compares, and the gate could never fail again.
+#
+# Every entry is the Rust server ahead of the Go one, not a divergence the two
+# disagree about; each is recorded in docs/CARRY-BACK.md for the Go server to
+# take. The exact new wording is pinned by tests in src/diagnostics.rs, not here,
+# because these strings carry version numbers that move with the archive.
+VERIFIED_FIX = (
+    "Rust names the lowest version clearing every advisory, checked back against "
+    "the index; Go names the worst advisory's fix, which can leave the others "
+    "unresolved. CARRY-BACK item 3."
+)
+LOCKFILE_CLAUSE = (
+    "Rust says when a finding was resolved in a lockfile, so editing the manifest "
+    "alone will not clear it. CARRY-BACK item 4."
+)
+
+EXPECTED: dict[tuple[str, str], str] = {
+    # Both changes at once: a verified fix, and a lockfile-resolved version.
+    ("npm-direct", "package.json"): f"{VERIFIED_FIX} {LOCKFILE_CLAUSE}",
+    ("npm-range-vs-lock", "package.json"): LOCKFILE_CLAUSE,
+    ("rust-cargo", "Cargo.toml"): LOCKFILE_CLAUSE,
+    ("npm-nolock", "package.json"): VERIFIED_FIX,
+    ("py-requirements", "requirements.txt"): VERIFIED_FIX,
+    # Go suppresses "Fixed in" for a multi-advisory toolchain finding, because
+    # the worst advisory's fix clears almost none of the other 75. A verified
+    # fix does not have that problem, so Rust names one.
+    ("go-mod", "go.mod"): VERIFIED_FIX,
+}
 
 
 def drain(stream, sink):
@@ -119,6 +148,15 @@ def publish(binary, root):
     return out
 
 
+def structure(entries):
+    """Everything but the message: range, severity, code."""
+    return None if entries is None else [e[:6] for e in entries]
+
+
+def wording(entries):
+    return None if entries is None else [e[6] for e in entries]
+
+
 def show(entries):
     if entries is None:
         return "    (nothing published)"
@@ -140,10 +178,18 @@ def main():
             if go.get(path) == rust.get(path):
                 print(f"   {path}: identical ({len(go.get(path, []))} diagnostics)")
                 continue
-            label = "differs as expected" if expected else "DIFFERS"
-            if not expected:
+
+            # Position, severity and code are not whitelistable. A difference
+            # here is a real divergence however the messages read.
+            if structure(go.get(path)) != structure(rust.get(path)):
                 failures += 1
-            print(f"   {path}: {label}" + (f" — {expected}" if expected else ""))
+                label = "DIFFERS (range/severity/code)"
+            elif expected:
+                label = f"wording differs as expected — {expected}"
+            else:
+                failures += 1
+                label = "DIFFERS (wording)"
+            print(f"   {path}: {label}")
             print("     go:")
             print(show(go.get(path)))
             print("     rust:")
@@ -152,7 +198,7 @@ def main():
     if failures:
         print("\nFAIL")
     elif EXPECTED:
-        print("\nAGREE (modulo the intended differences above)")
+        print("\nAGREE on range, severity and code; wording differs only as listed")
     else:
         print("\nAGREE — every diagnostic identical")
     return 1 if failures else 0

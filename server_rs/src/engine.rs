@@ -260,7 +260,7 @@ fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Ecosystem, Package, Range, Site};
+    use crate::model::{Ecosystem, Fix, Package, Range, Site};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -286,6 +286,7 @@ mod tests {
             reachable: None,
             from_range: false,
             dep_groups: Vec::new(),
+            fix: Fix::None,
         }
     }
 

@@ -19,6 +19,13 @@ use tower_lsp_server::{Client, LanguageServer};
 /// The files worth watching. One list, so the watcher globs and the "is this a
 /// manifest" test can never disagree — they did, in the Go server, while they
 /// were maintained separately.
+///
+/// Deliberately wider than the set `extract` can parse: a `yarn.lock` or
+/// `go.sum` changing means the project's dependencies changed, which is worth a
+/// rescan even though the dependencies themselves are read from the manifest
+/// beside it. The containment that *must* hold is the other direction — every
+/// file a parser reads has to be watched, or editing it changes nothing — and
+/// `every_parsed_manifest_is_watched` holds it.
 const MANIFESTS: &[&str] = &[
     "package.json",
     "package-lock.json",
@@ -304,6 +311,31 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_parsed_manifest_is_watched() {
+        // The direction that matters: a file some parser reads but nothing
+        // watches would never trigger a rescan when the user edited it.
+        for name in [
+            "package.json",
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "go.mod",
+            "Cargo.toml",
+            "Cargo.lock",
+            "requirements.txt",
+            "requirements-dev.txt",
+        ] {
+            assert!(
+                crate::is_manifest_name(name),
+                "{name:?} is in this list but no parser reads it"
+            );
+            assert!(
+                is_manifest(Path::new(name)),
+                "{name:?} is parsed but not watched, so editing it would change nothing"
+            );
+        }
+    }
 
     #[test]
     fn manifests_and_watcher_globs_agree() {

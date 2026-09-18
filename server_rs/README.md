@@ -38,7 +38,7 @@ a test that walks imports; module privacy gives that for free.
 
 ```sh
 cargo build --release              # target/release/package-checker-lsp
-cargo test                         # 58 tests
+cargo test
 cargo clippy --all-targets
 ```
 
@@ -50,7 +50,14 @@ Point Zed at `target/release/package-checker-lsp` through
 ```sh
 scripts/bench.sh                   # load time, retained memory, peak RSS, both servers
 scripts/compare-servers.py         # every published diagnostic, both servers, diffed
+cargo run --release --bin scanbench -- --runs 5 DIR   # a scan, phase by phase
 ```
+
+`scanbench` is `dbcheck`'s sibling and `cmd/scanharness`'s counterpart: the
+database is what `dbcheck` measures, and this is what the editor pays on every
+debounce. The answer it gave is that the scan is not worth optimising — 62 ms at
+the deliberate worst case of 100,200 files with nothing prunable, against a
+1,000 ms debounce. See `docs/CARRY-BACK.md` Tier 4.
 
 `bench.sh` builds the Go harness from this worktree if it is missing, so both
 implementations are always measured at the same commit. It also builds two
@@ -91,3 +98,9 @@ Reachability analysis, the transitive npm graph, hover, code actions,
 `$/progress` download reporting, and enrichment. See the last section of the verdict for the
 full list and for the one behavioural gap deliberately carried over from the Go
 server rather than fixed.
+
+This server is now **ahead of** the Go one in four places rather than merely
+equal to it — a verified upgrade target, `MAL-` aliases, bounded reads, and
+lockfile provenance in the wording. `docs/CARRY-BACK.md` Tier 4 has them, and
+`scripts/compare-servers.py` names the resulting differences rather than
+ignoring them.

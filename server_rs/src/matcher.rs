@@ -7,7 +7,7 @@
 //! now depends on.
 
 use crate::index::Index;
-use crate::model::{Advisory, Anchor, ExtractedPackage, Finding, Package};
+use crate::model::{Advisory, Anchor, ExtractedPackage, Finding, Fix, Package, PackageKey};
 use crate::version::Version;
 use std::sync::Arc;
 
@@ -32,6 +32,7 @@ impl<'a> Matcher<'a> {
             if advisories.is_empty() {
                 continue;
             }
+            let fix = self.fix_for(&extracted.package, &advisories);
             findings.push(Finding {
                 package: extracted.package.clone(),
                 advisories,
@@ -41,9 +42,64 @@ impl<'a> Matcher<'a> {
                 reachable: None,
                 from_range: extracted.from_range,
                 dep_groups: extracted.dep_groups.clone(),
+                fix,
             });
         }
         findings
+    }
+
+    /// Whether any advisory in the index still affects this package at
+    /// `version`.
+    ///
+    /// Shares `affects` with `applicable`, so a version this clears is one that
+    /// would produce no finding. Clones nothing, unlike `applicable`.
+    pub fn affected_at(&self, key: &PackageKey, version: &str) -> bool {
+        let Ok(parsed) = Version::parse(version, key.ecosystem) else {
+            // A version we cannot order is one we cannot recommend.
+            return true;
+        };
+        self.index
+            .lookup(key)
+            .any(|advisory| affects(advisory, key, version, &parsed))
+    }
+
+    /// The lowest published version above the installed one that no advisory on
+    /// this package still affects.
+    ///
+    /// Each candidate is checked against the whole index, not just the
+    /// advisories that produced this finding, because a fix for one can be
+    /// affected by another. "Above the installed one" keeps a fix backported to
+    /// an older release line from being offered as a downgrade.
+    pub fn fix_for(&self, package: &Package, advisories: &[Arc<Advisory>]) -> Fix {
+        let Ok(installed) = Version::parse(&package.version, package.ecosystem()) else {
+            return Fix::None;
+        };
+
+        let mut candidates: Vec<(Version<'_>, &str)> = advisories
+            .iter()
+            .flat_map(|advisory| advisory.fixed_versions_for(&package.key))
+            .filter_map(|fixed| {
+                Version::parse(fixed, package.ecosystem())
+                    .ok()
+                    .map(|parsed| (parsed, fixed))
+            })
+            .filter(|(parsed, _)| installed.compare(parsed) == std::cmp::Ordering::Less)
+            .collect();
+        if candidates.is_empty() {
+            return Fix::None;
+        }
+
+        // Ascending, so the first that clears is the lowest that does.
+        candidates.sort_by(|(a, _), (b, _)| a.compare(b));
+        // Backported fixes repeat the same version across advisories, and a
+        // Go toolchain finding carries seventy-six of them; each duplicate is
+        // an entire pass over the package's posting list.
+        candidates.dedup_by(|(a, _), (b, _)| a.compare(b) == std::cmp::Ordering::Equal);
+
+        candidates
+            .into_iter()
+            .find(|(_, fixed)| !self.affected_at(&package.key, fixed))
+            .map_or(Fix::Partial, |(_, fixed)| Fix::Clears(fixed.into()))
     }
 
     fn applicable(&self, package: &Package) -> Vec<Arc<Advisory>> {
@@ -56,7 +112,7 @@ impl<'a> Matcher<'a> {
         };
 
         let mut hits: Vec<Arc<Advisory>> = candidates
-            .filter(|advisory| affects(advisory, package, &version))
+            .filter(|advisory| affects(advisory, &package.key, &package.version, &version))
             .map(|advisory| Arc::new(advisory.clone()))
             .collect();
 
@@ -71,14 +127,16 @@ impl<'a> Matcher<'a> {
     }
 }
 
-fn affects(advisory: &Advisory, package: &Package, version: &Version<'_>) -> bool {
+/// Takes the key and the version separately rather than a `Package`, so
+/// checking a candidate fix does not have to build one per candidate.
+fn affects(advisory: &Advisory, key: &PackageKey, raw: &str, version: &Version<'_>) -> bool {
     for entry in &advisory.affected {
-        if entry.package != package.key {
+        if entry.package != *key {
             continue;
         }
         // An explicit version list is authoritative for the versions it names,
         // and OSV uses it for ecosystems with no reliable ordering.
-        if entry.versions.iter().any(|v| **v == *package.version) {
+        if entry.versions.iter().any(|v| **v == *raw) {
             return true;
         }
         if entry.ranges.iter().any(|range| in_range(range, version)) {
@@ -327,6 +385,206 @@ mod tests {
         assert_eq!(findings[0].severity(), Severity::Critical);
         // Ties on Critical fall back to the id, so the MAL- entry sorts second.
         assert_eq!(&*findings[0].worst().id, "GHSA-crit");
+    }
+
+    #[test]
+    fn an_advisory_aliased_to_a_mal_id_is_malicious() {
+        // `Finding::malicious()` is an `any`, so a sibling MAL- record usually
+        // rescues this. Here there is none, which is the case the per-advisory
+        // predicate has to get right on its own.
+        let index = index_of(vec![Advisory {
+            aliases: Box::from([Box::<str>::from("MAL-2026-1380")]),
+            ..advisory(
+                "GHSA-9ppg-jx86-fqw7",
+                0.0,
+                vec![npm("cline", vec![range("0", "")], vec![])],
+            )
+        }]);
+        let findings = Matcher::new(&index).findings(&[extracted("cline", "1.0.0")]);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].malicious());
+        assert_eq!(findings[0].severity(), Severity::Critical);
+    }
+
+    /// The `Fix` the matcher decides for one package against one index.
+    fn fix_of(index: &Index, name: &str, version: &str) -> Fix {
+        Matcher::new(index)
+            .findings(&[extracted(name, version)])
+            .into_iter()
+            .next()
+            .map_or(Fix::None, |f| f.fix)
+    }
+
+    #[test]
+    fn the_fix_is_the_lowest_version_clearing_every_advisory() {
+        // Shaped on lodash@4.17.15: the worst advisory is fixed in 4.17.21,
+        // but another is still open until 4.18.0.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-worst",
+                7.2,
+                vec![npm("lodash", vec![range("0", "4.17.21")], vec![])],
+            ),
+            advisory(
+                "GHSA-later",
+                5.0,
+                vec![npm("lodash", vec![range("0", "4.18.0")], vec![])],
+            ),
+        ]);
+        assert_eq!(
+            fix_of(&index, "lodash", "4.17.15"),
+            Fix::Clears("4.18.0".into())
+        );
+    }
+
+    #[test]
+    fn a_fix_another_advisory_still_affects_is_rejected() {
+        // The reason the verification step exists. A is fixed in 1.5.0, but B
+        // covers everything below 2.0.0 — so 1.5.0 is no fix at all, and the
+        // answer has to be the next candidate up.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-a",
+                9.0,
+                vec![npm("evil", vec![range("1.0.0", "1.5.0")], vec![])],
+            ),
+            advisory(
+                "GHSA-b",
+                5.0,
+                vec![npm("evil", vec![range("0", "2.0.0")], vec![])],
+            ),
+        ]);
+        assert_eq!(
+            fix_of(&index, "evil", "1.2.0"),
+            Fix::Clears("2.0.0".into()),
+            "1.5.0 is itself affected by GHSA-b"
+        );
+    }
+
+    #[test]
+    fn disjoint_release_lines_have_no_single_fix() {
+        // One advisory is fixed in 2.0.0; another opened at 1.0.0 and never
+        // closed, so nothing published clears both.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-fixed",
+                7.0,
+                vec![npm("pkg", vec![range("0", "2.0.0")], vec![])],
+            ),
+            advisory(
+                "GHSA-open",
+                7.0,
+                vec![npm("pkg", vec![range("1.0.0", "")], vec![])],
+            ),
+        ]);
+        assert_eq!(fix_of(&index, "pkg", "1.5.0"), Fix::Partial);
+    }
+
+    #[test]
+    fn an_advisory_with_only_last_affected_names_no_fix() {
+        let index = index_of(vec![advisory(
+            "GHSA-1",
+            7.0,
+            vec![npm(
+                "pkg",
+                vec![AffectedRange {
+                    introduced: "0".into(),
+                    fixed: Box::default(),
+                    last_affected: "2.0.0".into(),
+                }],
+                vec![],
+            )],
+        )]);
+        assert_eq!(fix_of(&index, "pkg", "1.0.0"), Fix::None);
+    }
+
+    #[test]
+    fn candidates_are_ordered_by_the_ecosystem_not_the_archive() {
+        // Lexicographically "10.0.0" sorts below "9.0.0", so a string sort
+        // would answer 9.0.0 here and leave the other advisory unresolved.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-a",
+                7.0,
+                vec![npm("pkg", vec![range("0", "9.0.0")], vec![])],
+            ),
+            advisory(
+                "GHSA-b",
+                7.0,
+                vec![npm("pkg", vec![range("0", "10.0.0")], vec![])],
+            ),
+        ]);
+        assert_eq!(fix_of(&index, "pkg", "1.0.0"), Fix::Clears("10.0.0".into()));
+    }
+
+    #[test]
+    fn a_fix_named_in_an_explicit_versions_list_is_rejected() {
+        // OSV uses `versions` where ordering is unreliable, and `affects`
+        // already honours it — so the verification has to as well.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-a",
+                7.0,
+                vec![npm("pkg", vec![range("0", "2.0.0")], vec![])],
+            ),
+            advisory("GHSA-b", 7.0, vec![npm("pkg", vec![], vec!["2.0.0"])]),
+        ]);
+        assert_eq!(fix_of(&index, "pkg", "1.0.0"), Fix::Partial);
+    }
+
+    #[test]
+    fn affected_at_agrees_with_findings() {
+        let index = index_of(vec![advisory(
+            "GHSA-1",
+            7.0,
+            vec![npm("pkg", vec![range("1.0.0", "2.0.0")], vec![])],
+        )]);
+        let matcher = Matcher::new(&index);
+        let key = crate::model::PackageKey::new(Ecosystem::Npm, "pkg");
+        for version in ["0.9.0", "1.0.0", "1.9.9", "2.0.0", "3.0.0"] {
+            assert_eq!(
+                matcher.affected_at(&key, version),
+                !matches(&index, "pkg", version).is_empty(),
+                "the two must share one definition of affected, at {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backported_fix_is_never_offered_as_a_downgrade() {
+        // One advisory patched on two release lines at once. 1.2.3 is
+        // genuinely unaffected, and genuinely useless to a project on 2.0.0.
+        let index = index_of(vec![advisory(
+            "GHSA-1",
+            7.0,
+            vec![npm(
+                "pkg",
+                vec![range("1.0.0", "1.2.3"), range("2.0.0", "2.0.1")],
+                vec![],
+            )],
+        )]);
+        assert_eq!(fix_of(&index, "pkg", "2.0.0"), Fix::Clears("2.0.1".into()));
+        // The lower line still gets the lower fix, which is right for it.
+        assert_eq!(fix_of(&index, "pkg", "1.1.0"), Fix::Clears("1.2.3".into()));
+    }
+
+    #[test]
+    fn a_fix_at_or_below_the_installed_version_is_not_a_fix() {
+        // Everything published is behind us and something is still open, so
+        // there is nothing to upgrade to.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-old",
+                7.0,
+                vec![npm("pkg", vec![range("0", "1.0.0")], vec![])],
+            ),
+            advisory(
+                "GHSA-open",
+                7.0,
+                vec![npm("pkg", vec![range("2.0.0", "")], vec![])],
+            ),
+        ]);
+        assert_eq!(fix_of(&index, "pkg", "3.0.0"), Fix::None);
     }
 
     #[test]

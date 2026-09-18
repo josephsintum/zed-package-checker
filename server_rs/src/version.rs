@@ -63,4 +63,20 @@ impl<'a> Version<'a> {
             Version::PyPI(v) => Ok(v.compare(&PyPiVersion::parse(other))),
         }
     }
+
+    /// Compares against another already-parsed version.
+    ///
+    /// Infallible where `compare_str` is not, which is what makes it usable as
+    /// a sort comparator: swallowing a `Result` into `Equal` gives an
+    /// intransitive relation, and `sort_by` panics on one.
+    ///
+    /// A cross-ecosystem pair orders `Equal` rather than panicking — nothing in
+    /// an advisory should be able to abort the server.
+    pub fn compare(&self, other: &Version<'_>) -> Ordering {
+        match (self, other) {
+            (Version::Semver(a), Version::Semver(b)) => a.compare(b),
+            (Version::PyPI(a), Version::PyPI(b)) => a.compare(b),
+            _ => Ordering::Equal,
+        }
+    }
 }

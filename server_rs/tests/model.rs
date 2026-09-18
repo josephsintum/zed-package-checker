@@ -17,6 +17,15 @@ fn advisory(id: &str, score: f64) -> Advisory {
     }
 }
 
+/// The same, carrying aliases. Separate rather than a seventh parameter on
+/// `advisory`, which fifteen callers would otherwise have to restate.
+fn aliased(id: &str, aliases: &[&str]) -> Advisory {
+    Advisory {
+        aliases: aliases.iter().map(|&a| Box::from(a)).collect(),
+        ..advisory(id, 0.0)
+    }
+}
+
 fn site(path: &str, line: u32) -> Site {
     Site::new(path, Range::whole_line(line))
 }
@@ -31,6 +40,7 @@ fn finding(pkg: Package, advisories: Vec<Advisory>) -> Finding {
         reachable: None,
         from_range: false,
         dep_groups: Vec::new(),
+        fix: Fix::None,
     }
 }
 
@@ -138,6 +148,21 @@ fn malicious_outranks_its_score() {
     // No CVSS at all, still critical: "remove this now" does not scale.
     assert_eq!(advisory("MAL-2024-1", 0.0).severity(), Severity::Critical);
     assert_eq!(advisory("MAL-2024-1", 1.0).severity(), Severity::Critical);
+}
+
+#[test]
+fn advisory_malicious_reads_the_aliases_too() {
+    // How OSV files the npm compromises: a GHSA id, with the canonical MAL-
+    // identifier reachable only through the aliases.
+    let compromised = aliased("GHSA-9ppg-jx86-fqw7", &["MAL-2026-1380"]);
+    assert!(compromised.malicious());
+    assert_eq!(compromised.severity(), Severity::Critical);
+
+    assert!(aliased("GHSA-x", &["CVE-2024-1", "MAL-2024-5"]).malicious());
+    // The prefix stays exact on an alias, as it is on an id.
+    assert!(!aliased("GHSA-x", &["MALFORMED-1"]).malicious());
+    assert!(!aliased("GHSA-x", &["CVE-2024-1", "GHSA-y"]).malicious());
+    assert!(!aliased("GHSA-x", &[]).malicious());
 }
 
 #[test]

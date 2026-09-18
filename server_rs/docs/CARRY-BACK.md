@@ -184,6 +184,153 @@ self-healing property without paying for it every time.
 
 ---
 
+## Tier 4 — correctness, found by auditing the diagnostic path
+
+These are not about speed, and unlike Tiers 1–3 they change what a user reads.
+All four are implemented and tested in `server_rs/`; none is in `server/`. They
+are the reason `scripts/compare-servers.py` now carries six entries in its
+`EXPECTED` table instead of none — every one of those entries is the Rust server
+ahead of the Go one, not a disagreement about behaviour.
+
+### 10. "Fixed in X" names a version that does not fix it
+
+`messageFor` (`internal/lsp/diagnostics.go:136`) reports the **worst advisory's**
+fixed versions. Across several advisories that is not a remedy, and the archives
+say so:
+
+| Package | We say | Actually clears every advisory |
+|---|---|---|
+| `npm:lodash@4.17.15` | 4.17.21 | **4.18.0** |
+| `PyPI:requests@2.19.1` | 2.20.0 | **2.33.0** |
+
+The `npm-range-vs-lock` fixture already demonstrated the bug and nobody noticed:
+it pins lodash at **4.17.21** — the version `npm-direct` tells you to upgrade to
+— and is still flagged, by three advisories.
+
+The fix is to pick the lowest published fix that no advisory on the package still
+affects, verified by running the match again against that candidate. Cheap here,
+because the whole database is already in memory: single-digit candidates against
+single-digit advisories, once per finding per scan.
+
+Three outcomes rather than two, because "no fix is published" and "fixes exist
+but none clears everything" are different sentences: `Clears(v)` → `". Fixed in
+{v}"`, `Partial` → `". No single version clears all of them"` (or `". No
+published version clears it"` when there is only one), `None` → say nothing, as
+today.
+
+**The trap, found in review here and worth knowing before you write it:** the
+candidate list must be filtered to versions *above* the installed one. An
+advisory patched on two release lines at once publishes a fix on each, and the
+lower one is genuinely unaffected — so "the lowest candidate that clears
+everything" answers 1.2.3 for a project on 2.0.0, and the diagnostic instructs a
+downgrade. The old "list every fixed version" wording could not do this, because
+it never named a single version to move to. Django-style advisories (2.2.28 /
+3.2.13 / 4.0.4) hit it routinely.
+
+This also removes the Go-toolchain special case (`diagnostics.go`), whose comment
+— *"Across seventy-six it is merely the worst one's fix and clears almost none of
+the others"* — describes exactly the defect being fixed. With a verified fix,
+`Go toolchain 1.21` now reads `Fixed in 1.25.13`.
+
+**Prerequisite, and not optional:** `internal/db/osv.go` does not decode OSV's
+range `type`, so `GIT` ranges are flattened like `ECOSYSTEM` ones. **1,575
+advisories carry them** — 1,574 PyPI, 1 npm — every one with a commit hash as its
+`fixed` value. It is masked today only because PYSEC entries carry no CVSS and so
+rarely win `worst()`; a computation that considers *every* advisory unmasks it,
+and neither comparator rejects a forty-character hash — both order it silently.
+Drop `GIT` ranges only, so an absent or unrecognised type is still indexed: the
+filter can lose a hash, never an advisory. Verified against the real archives —
+PyPI still indexes 25,029 advisories over 13,316 packages, unchanged.
+
+### 11. A confirmed-malicious package can be reported as an ordinary advisory
+
+`Advisory.Malicious()` (`internal/model/advisory.go:115`) checks the id only.
+OSV files some confirmed-malicious events under a `GHSA-` id and cross-references
+the canonical `MAL-` one **only as an alias** — twelve such advisories are in the
+npm archive now, all from the Shai-Hulud compromise (`debug`, `color-name`,
+`error-ex`, `nx`, …).
+
+**Stated precisely, because the first version of this entry overstated it:** in
+today's npm archive this changes no finding. Eleven of the twelve are also
+covered by a standalone `MAL-` record over the same package, and
+`Finding.Malicious()` is an `any`, so the finding is already labelled. The
+twelfth (`GHSA-cxm3-wv7p-598c`, over `@nx/key`) is **withdrawn**, so it is never
+indexed at all. Checked by building an id→record map over all 229,049 npm
+advisories rather than by looking records up by filename, which is what produced
+the wrong answer the first time.
+
+Take it anyway, as hardening rather than a fix, for two reasons:
+
+- **The rescue is incidental.** It holds only while a sibling `MAL-` record
+  happens to cover the same package *at the same version*. Nothing in OSV
+  guarantees that, and the archive is re-downloaded daily.
+- **The per-advisory predicate is wrong as written.** `GHSA-9ppg-jx86-fqw7` *is*
+  a malicious-package record; asking that advisory whether it is malicious
+  currently returns false. Everything that consults one advisory rather than the
+  finding — `Severity()`, the sort in `applicable`, and so the `code` and
+  `codeDescription` a user clicks — gets the wrong answer even where the finding
+  as a whole is labelled correctly.
+
+One line: check `Aliases` as well as `ID`. Not `Related`, which means "see also"
+rather than "the same thing under another name". `Aliases` is already populated
+and read nowhere, so this is its first real use on both sides.
+
+### 12. Nothing says a manifest edit will not clear the diagnostic
+
+A finding resolved in a lockfile is anchored on the manifest declaration, which
+is right — that is where the user can act — but editing it alone does nothing
+until the lockfile is regenerated. The `relatedInformation` link already points
+at the lockfile; many clients only show it on hover.
+
+One clause, in the existing fact-comma-so-consequence style:
+`". Version comes from the lockfile, so editing this file alone will not clear it"`.
+
+Derive it and the `relatedInformation` branch from **one** predicate
+(`evidence.Path != anchorSite().Path`), so the sentence and the link cannot come
+to disagree about when a lockfile is involved.
+
+**Note before taking this:** `reconcile` looks up `declared` by exact directory
+while `lockedAtOrAbove` walks upward (`internal/extract/convert.go:88-126`), so
+in an npm workspace — lockfile at the root, `package.json` in `packages/app/` —
+the member loses its anchor and the squiggle lands on the lockfile. The sentence
+will be absent exactly where it is most needed. Worth fixing first.
+
+### 13. Every read of a project file is unbounded
+
+`os.ReadFile` in `internal/scan/scan.go:313`, `internal/lsp/anchor.go:55` and
+`internal/lsp/encoding.go:25`, plus whatever scalibr does internally. A manifest
+comes from whatever repository the user opened. The Go side is additionally
+looser than the Rust one on file *count*: `WithMaxInodes` exists and is never
+called, so `maxInodes` is 0, which means unlimited.
+
+Cap the bytes and skip an oversized file rather than truncating it — `Cargo.lock`
+and `requirements.txt` are line-based, so a prefix parses cleanly and turns "too
+big to scan" into "half your dependencies are clean". 16 MiB is the figure used
+here; a monorepo `package-lock.json` reaches ten.
+
+### Not carried back from this round
+
+**Nothing about scan speed.** The scan was measured phase by phase
+(`server_rs/src/bin/scanbench.rs`, the counterpart to `cmd/scanharness`) against
+the fixtures, this repository, two real monorepos, and a synthetic 100,200-file
+tree with nothing prunable in it — the deliberate worst case, right at the inode
+cap:
+
+| Tree | Files walked | Walk | Read+parse | Match |
+|---|---:|---:|---:|---:|
+| `npm-direct` fixture | 3 | 0.1 ms | 0.1 ms | 0.01 ms |
+| This repository | 134 | 0.8 ms | 0.6 ms | 2.9 ms |
+| A 136k-file monorepo | 4,914 | 6.4 ms | ~0 ms | 0.2 ms |
+| Synthetic, 100k files, nothing prunable | 100,200 | 59.3 ms | 1.7 ms | 1.2 ms |
+
+The worst case is **62 ms behind a 1,000 ms debounce**. An mtime-gated parse
+cache would save 1.7 ms of it; a parallel walk would attack the 59 ms that is
+already 6% of the window it sits behind; the duplicate read on the publish path
+is 10–200 KiB. None of them is worth writing, and that is the result — not a
+gap left open.
+
+---
+
 ## Deliberately not carried back
 
 - **Rewriting in Rust.** The remaining gap after Tier 1 is 2.6× on load and
@@ -204,9 +351,13 @@ self-healing property without paying for it every time.
 2. **Item 4**, once you have decided where the limit comes from. It is a policy
    decision about memory and deserves its own argument in the commit message,
    not a line smuggled in with a speed patch.
-3. **Item 8** when the refresh story is next touched — it is a correctness bug
+3. **Item 10**, ahead of everything else left: it is a wrong answer a user acts
+   on rather than a slow one, and its GIT-range prerequisite has to land with it.
+   Items 11 and 13 are cheap and belong in the same pass.
+4. **Item 8** when the refresh story is next touched — it is a correctness bug
    with a user-visible consequence, not an optimisation.
-4. Items 6, 7 and 9 only if something makes them matter.
+5. **Item 12** after the workspace-anchor bug it depends on.
+6. Items 6, 7 and 9 only if something makes them matter.
 
 `README.md` needs updating either way: its npm row says 3.5 s and 3.5 s is no
 longer true.

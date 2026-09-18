@@ -723,6 +723,42 @@ dependency does and osv.dev has no advisories for private packages anyway. A one
 `window/showMessage` names what was sent, which is the consent step this class of tool
 usually omits.
 
+## Task: a setting for how much of a package's history to show
+
+*Raised 2026-09-18, from seeing this server and deps-lsp side by side in one panel.*
+
+Today one dependency produces **one** diagnostic, aggregating its advisories:
+`gin@1.6.0 — 5 advisories, worst High (CVSS 7.1). Fixed in 1.7.7`. deps-lsp
+produces one diagnostic **per advisory**, so the same dependency fills the panel
+with `GHSA-h395-qcrw-5vmq`, `GO-2021-0052`, `GO-2023-1737` as separate rows.
+
+Two things could be meant by "show all vulnerabilities", and they are different
+features — settle which before building:
+
+1. **Advisories that do not affect the installed version.** Newly possible: the
+   per-package cache fetches a package's *complete* set, so for `lodash` we hold
+   ten advisories and report the six that match. A setting could surface the
+   other four as informational — "clear at this version" — which is useful when
+   deciding whether to pin or move.
+2. **One diagnostic per advisory instead of one per package.** Purely a
+   rendering choice over data already in hand, matching deps-lsp's shape. The
+   aggregate exists because a package with seventy-six advisories makes the line
+   unreadable, so this would want a cap.
+
+Reading 1 is the one the new data makes possible and the one that says something
+the user cannot already get by hovering. Default stays as it is either way:
+only what affects the version you have.
+
+Shape, if it is reading 1:
+
+```jsonc
+{ "diagnostics": { "scope": "affecting" } }   // default, today's behaviour
+{ "diagnostics": { "scope": "all" } }         // plus advisories cleared by this version
+```
+
+Both need `Finding` to carry the non-matching advisories, which `Matcher` drops
+today — so it is a change to matching, not only to wording.
+
 ## What a fifth ecosystem actually costs
 
 Measured against `server_rs/`, which has the same four ecosystems in one flat

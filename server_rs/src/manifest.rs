@@ -1,4 +1,4 @@
-//! The four manifest formats, parsed with their spans.
+//! The six manifest parsers, across five formats, each with its spans.
 //!
 //! Each function is pure: source text and a path in, sightings out, no
 //! filesystem. A file that will not parse yields nothing rather than an error —
@@ -19,6 +19,9 @@ const NPM_SECTIONS: [(&str, Option<&str>); 4] = [
     ("peerDependencies", Some("peer")),
     ("devDependencies", Some(DEV_GROUP)),
 ];
+
+/// What every manifest parser is: source text and a path in, sightings out.
+pub type Parser = fn(&str, &Path) -> Vec<ExtractedPackage>;
 
 fn sighting(
     ecosystem: Ecosystem,
@@ -662,5 +665,210 @@ fn prop_name<'a>(name: &'a ObjectPropName<'a>) -> Option<(&'a str, (usize, usize
             Some((s.value.as_ref(), (s.range.start + 1, s.range.end - 1)))
         }
         ObjectPropName::Word(w) => Some((w.value, (w.range.start, w.range.end))),
+    }
+}
+
+/// What every parser must do regardless of the format it reads.
+///
+/// A table rather than six copies: an edge case found in one format is almost
+/// always an edge case in the others, and a per-parser test is a fix that
+/// reaches one of them.
+#[cfg(test)]
+mod conformance {
+    use super::*;
+
+    const PACKAGE_JSON: &str =
+        "{\n  \"name\": \"p\",\n  \"dependencies\": {\n    \"lodash\": \"4.17.15\"\n  }\n}\n";
+    const PACKAGE_LOCK: &str = "{\n  \"lockfileVersion\": 3,\n  \"packages\": {\n    \"node_modules/lodash\": {\n      \"version\": \"4.17.15\"\n    }\n  }\n}\n";
+    const GO_MOD: &str = "module example.com/p\n\nrequire github.com/gin-gonic/gin v1.6.0\n";
+    const CARGO_TOML: &str = "[package]\nname = \"p\"\n\n[dependencies]\ntime = \"0.1.44\"\n";
+    const CARGO_LOCK: &str = "version = 3\n\n[[package]]\nname = \"time\"\nversion = \"0.1.44\"\n";
+    const REQUIREMENTS: &str = "requests==2.19.1\n";
+
+    /// Every parser, with the file it serves and a sample naming one package.
+    const PARSERS: &[(&str, Parser, &str)] = &[
+        ("package.json", package_json as Parser, PACKAGE_JSON),
+        ("package-lock.json", package_lock, PACKAGE_LOCK),
+        ("go.mod", go_mod, GO_MOD),
+        ("Cargo.toml", cargo_toml, CARGO_TOML),
+        ("Cargo.lock", cargo_lock, CARGO_LOCK),
+        ("requirements.txt", requirements, REQUIREMENTS),
+    ];
+
+    fn path_for(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from("/p").join(name)
+    }
+
+    /// A position back to the byte offset it came from. Columns are byte
+    /// offsets within the line at this stage — the UTF-16 conversion happens
+    /// later, in `diagnostics` — so this is just the line start plus the column.
+    fn offset_of(src: &str, position: crate::model::Position) -> usize {
+        let line_start: usize = src
+            .split_inclusive('\n')
+            .take(position.line as usize)
+            .map(str::len)
+            .sum();
+        line_start + position.column as usize
+    }
+
+    #[test]
+    fn every_sample_names_exactly_one_package() {
+        // Not a property of the parsers so much as of the table: a sample that
+        // stopped parsing would make every test below vacuous.
+        for (name, parse, sample) in PARSERS {
+            let found = parse(sample, &path_for(name));
+            assert_eq!(found.len(), 1, "{name} found {found:?}");
+        }
+    }
+
+    #[test]
+    fn empty_input_yields_nothing() {
+        for (name, parse, _) in PARSERS {
+            for src in ["", "\n", "\n\n\n", "   ", "\r\n"] {
+                assert!(
+                    parse(src, &path_for(name)).is_empty(),
+                    "{name} found something in {src:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hostile_input_yields_nothing_rather_than_panicking() {
+        // The parsers are the only part of this server reading attacker-chosen
+        // bytes, and the binary aborts on panic — so a panic here is the whole
+        // language server, not one bad file.
+        let hostile: Vec<String> = vec![
+            "\0".into(),
+            "{".into(),
+            "[".into(),
+            "=".into(),
+            "[[".into(),
+            "\u{feff}".into(),
+            "\"".repeat(10_000),
+            "\\\n".repeat(1_000),
+            "[".repeat(600),
+            "{\"a\":".repeat(600),
+            "x".repeat(1_000_000),
+            "require (".into(),
+            "[[package]]".into(),
+        ];
+        for (name, parse, _) in PARSERS {
+            for src in &hostile {
+                let found = parse(src, &path_for(name));
+                assert!(
+                    found.is_empty(),
+                    "{name} found {} package(s) in hostile input",
+                    found.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn crlf_reads_the_same_as_lf() {
+        // Every parser trims line endings somewhere, and a branch that forgets
+        // to would leave a version ending in \r or a span one column wide.
+        for (name, parse, sample) in PARSERS {
+            let unix = parse(sample, &path_for(name));
+            let dos = parse(&sample.replace('\n', "\r\n"), &path_for(name));
+            assert_eq!(unix.len(), dos.len(), "{name}: count differs under CRLF");
+            for (a, b) in unix.iter().zip(&dos) {
+                assert_eq!(a.package, b.package, "{name}: package differs under CRLF");
+                assert_eq!(
+                    a.evidence.range, b.evidence.range,
+                    "{name}: span differs under CRLF"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_span_lies_within_the_source_and_covers_an_identifier() {
+        // Weakened to "name or version" on purpose: go.mod anchors the
+        // toolchain sighting on the version, because `go 1.21` names no
+        // package. Still catches an off-by-one or an out-of-bounds span.
+        for (name, parse, sample) in PARSERS {
+            for found in parse(sample, &path_for(name)) {
+                let range = found.evidence.range;
+                let start = offset_of(sample, range.start);
+                let end = offset_of(sample, range.end);
+                assert!(start <= end, "{name}: inverted span {range:?}");
+                assert!(end <= sample.len(), "{name}: span past the end of {name}");
+
+                let covered = &sample[start..end];
+                assert!(
+                    covered == found.package.name() || covered == &*found.package.version,
+                    "{name}: span covers {covered:?}, not {} or {}",
+                    found.package.name(),
+                    found.package.version
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_deeply_nested_lockfile_does_not_overflow_the_stack() {
+        // `lock_tree` recurses once per level of a v1 lockfile's nested
+        // `dependencies`, with no depth limit of its own — it is safe only
+        // because jsonc-parser refuses to build an AST past 512 levels. That is
+        // a dependency's constant, so this pins it: a bump that removes it
+        // turns this red rather than turning the server into an abort.
+        let depth = 600;
+        let mut src = String::from("{\"dependencies\":");
+        for _ in 0..depth {
+            src.push_str("{\"a\":{\"version\":\"1.0.0\",\"dependencies\":");
+        }
+        src.push_str("{}");
+        for _ in 0..depth {
+            src.push_str("}}");
+        }
+        src.push('}');
+
+        let found = package_lock(&src, &path_for("package-lock.json"));
+        assert!(
+            found.is_empty(),
+            "a lockfile nested past the parser's limit must yield nothing, got {}",
+            found.len()
+        );
+
+        // And the same shape within the limit does parse, so the test above is
+        // measuring the limit rather than a malformed string.
+        let mut shallow = String::from("{\"dependencies\":");
+        for _ in 0..8 {
+            shallow.push_str("{\"a\":{\"version\":\"1.0.0\",\"dependencies\":");
+        }
+        shallow.push_str("{}");
+        for _ in 0..8 {
+            shallow.push_str("}}");
+        }
+        shallow.push('}');
+        assert_eq!(
+            package_lock(&shallow, &path_for("package-lock.json")).len(),
+            8
+        );
+    }
+
+    #[test]
+    fn parsing_is_deterministic() {
+        for (name, parse, sample) in PARSERS {
+            assert_eq!(
+                parse(sample, &path_for(name)),
+                parse(sample, &path_for(name)),
+                "{name} is not deterministic"
+            );
+        }
+    }
+
+    #[test]
+    fn the_path_is_echoed_never_inspected() {
+        // The module's stated contract: source text and a path in, no
+        // filesystem. None of these paths exists.
+        for (_, parse, sample) in PARSERS {
+            let path = Path::new("/nonexistent/deeply/nested/file");
+            for found in parse(sample, path) {
+                assert_eq!(found.evidence.path, path);
+            }
+        }
     }
 }

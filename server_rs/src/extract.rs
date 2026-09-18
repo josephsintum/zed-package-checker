@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 /// In code rather than in user-visible defaults: a manifest under
 /// `node_modules` describes someone else's package, which is a correctness
 /// property and not a preference.
-const SKIP_DIRS: &[&str] = &[
+pub const SKIP_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     ".venv",
@@ -66,6 +66,13 @@ impl Extractor {
         self
     }
 
+    /// Overridable so the truncation path can be exercised without building a
+    /// hundred thousand files. Not a setting: nothing reads it from the client.
+    pub fn with_max_files(mut self, max: usize) -> Self {
+        self.max_files = max;
+        self
+    }
+
     /// Every dependency declared anywhere under `root`.
     pub fn extract(&self, root: &Path) -> Result<Vec<ExtractedPackage>, ExtractError> {
         // Owned, because the walker's filter outlives this borrow of `self`.
@@ -110,15 +117,24 @@ impl Extractor {
             }
             files += 1;
             if files > self.max_files {
+                // Said out loud, because the partial report is published as
+                // authoritative: findings past this point are not merely
+                // missing, they are actively cleared.
+                tracing::warn!(
+                    root = %root.display(),
+                    max_files = self.max_files,
+                    "tree too large to walk in full; scanned only part of it"
+                );
                 break;
             }
             let path = entry.path();
             let Some(parse) = parser_for(path) else {
                 continue;
             };
-            let Ok(source) = std::fs::read_to_string(path) else {
+            let Some(source) = crate::read::manifest(path) else {
                 // A manifest we cannot read is not a scan failure: it may be
-                // binary, or being written right now.
+                // binary, being written right now, or larger than anything
+                // worth scanning.
                 continue;
             };
             if path.file_name().is_some_and(|n| n == "Cargo.toml")
@@ -134,10 +150,19 @@ impl Extractor {
     }
 }
 
-type Parser = fn(&str, &Path) -> Vec<ExtractedPackage>;
+/// Whether a filename is one some parser reads.
+///
+/// Exported so nothing has to keep a second copy of the list: `lsp` watches
+/// these and `scanbench` counts them.
+pub fn is_manifest_name(name: &str) -> bool {
+    parser_for_name(name).is_some()
+}
 
-fn parser_for(path: &Path) -> Option<Parser> {
-    let name = path.file_name()?.to_str()?;
+fn parser_for(path: &Path) -> Option<manifest::Parser> {
+    parser_for_name(path.file_name()?.to_str()?)
+}
+
+fn parser_for_name(name: &str) -> Option<manifest::Parser> {
     match name {
         "package.json" => Some(manifest::package_json),
         "package-lock.json" | "npm-shrinkwrap.json" => Some(manifest::package_lock),
@@ -263,5 +288,71 @@ fn locked_at_or_above(locked: &std::collections::HashSet<Scope>, scope: &Scope) 
             Some(parent) if parent != dir => dir = parent,
             _ => return false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three manifests in one directory, each naming one dependency.
+    fn tree() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for name in ["a", "b", "c"] {
+            let sub = dir.path().join(name);
+            std::fs::create_dir(&sub).expect("mkdir");
+            std::fs::write(
+                sub.join("go.mod"),
+                format!("module example.com/{name}\n\nrequire example.com/dep-{name} v1.0.0\n"),
+            )
+            .expect("write");
+        }
+        dir
+    }
+
+    #[test]
+    fn every_manifest_is_found_when_the_walk_is_not_capped() {
+        let dir = tree();
+        let found = Extractor::new().extract(dir.path()).expect("extract");
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    fn the_walk_stops_at_max_files() {
+        // The cap counts every file the walk visits, not every manifest, so two
+        // files is two manifests here — one directory each.
+        let dir = tree();
+        let found = Extractor::new()
+            .with_max_files(2)
+            .extract(dir.path())
+            .expect("extract");
+        assert!(
+            found.len() < 3,
+            "the cap must actually truncate, got {} packages",
+            found.len()
+        );
+    }
+
+    #[test]
+    fn a_manifest_over_the_read_cap_is_skipped_rather_than_truncated() {
+        // A `go.mod` whose declared size exceeds the read cap. Truncating it
+        // would report the dependencies in the prefix and silently drop the
+        // rest, which reads as "the others are clean".
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("go.mod");
+        std::fs::write(
+            &path,
+            "module example.com/x\n\nrequire example.com/dep v1.0.0\n",
+        )
+        .expect("write");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_len(crate::read::MAX_MANIFEST_BYTES + 1)
+            .expect("grow");
+
+        let found = Extractor::new().extract(dir.path()).expect("extract");
+        assert!(found.is_empty(), "an oversized manifest must yield nothing");
     }
 }

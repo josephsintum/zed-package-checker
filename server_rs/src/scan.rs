@@ -12,7 +12,7 @@ use crate::index::Index;
 use crate::load::{Strategy, load};
 use crate::matcher::Matcher;
 use crate::model::{Ecosystem, Report, ecosystems_of};
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,6 +34,8 @@ pub enum ScanError {
 
 pub struct WorkspaceScanner {
     extractor: Extractor,
+    /// Shared with the LSP layer, which swaps it on `didChangeConfiguration`.
+    config: Arc<ArcSwap<crate::config::Config>>,
     database: Arc<Database>,
     /// Shared rather than owned because the background download replaces it
     /// from another thread when new archives land.
@@ -53,12 +55,20 @@ impl WorkspaceScanner {
     ) -> WorkspaceScanner {
         WorkspaceScanner {
             extractor,
+            config: Arc::new(ArcSwap::from_pointee(crate::config::Config::default())),
             database,
             index: Arc::new(ArcSwapOption::empty()),
             warming: Arc::new(AtomicBool::new(false)),
             on_ready: Arc::new(on_ready),
             strategy: Strategy::default(),
         }
+    }
+
+    /// Shares the live configuration with the LSP layer.
+    #[must_use]
+    pub fn with_config(mut self, config: Arc<ArcSwap<crate::config::Config>>) -> Self {
+        self.config = config;
+        self
     }
 
     /// Discards the cached index, so the next scan rebuilds it.

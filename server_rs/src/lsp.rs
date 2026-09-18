@@ -5,6 +5,7 @@
 //! Go server handles and nothing else; `tower-lsp-server` answers anything else
 //! with "method not found".
 
+use crate::config::Config;
 use crate::diagnostics::{self, NAME};
 use crate::engine::{Engine, Publisher, Reason, Requester};
 use crate::model::Finding;
@@ -12,6 +13,8 @@ use crate::span::Encoding;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+
+use arc_swap::ArcSwap;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer};
@@ -63,7 +66,10 @@ fn watched_globs() -> Vec<FileSystemWatcher> {
 
 /// Builds the scanner once the workspace root is known, which is not until
 /// `initialize`.
-type BuildScanner = dyn Fn(&Path, Requester) -> Arc<dyn crate::engine::Scanner> + Send + Sync;
+/// Builds the scanner once the root is known, handed the live configuration so
+/// a `didChangeConfiguration` reaches it without rebuilding anything.
+type BuildScanner =
+    dyn Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::engine::Scanner> + Send + Sync;
 
 /// Sends diagnostics to the client from whatever task produced them.
 struct ClientPublisher {
@@ -102,6 +108,9 @@ pub struct Backend {
     /// Written once during `initialize`, read from every publishing task. Since
     /// the extractors emit byte columns, this decides whether they are correct.
     utf16: Arc<AtomicBool>,
+    /// Swapped wholesale on `didChangeConfiguration`; the scanner holds the
+    /// same handle, so a change takes effect on the next scan with no restart.
+    config: Arc<ArcSwap<Config>>,
     build: Box<BuildScanner>,
 }
 
@@ -111,7 +120,10 @@ impl Backend {
     pub fn new(
         client: Client,
         version: String,
-        build: impl Fn(&Path, Requester) -> Arc<dyn crate::engine::Scanner> + Send + Sync + 'static,
+        build: impl Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::engine::Scanner>
+        + Send
+        + Sync
+        + 'static,
     ) -> Backend {
         Backend {
             client,
@@ -119,6 +131,7 @@ impl Backend {
             root: OnceLock::new(),
             engine: OnceLock::new(),
             utf16: Arc::new(AtomicBool::new(false)),
+            config: Arc::new(ArcSwap::from_pointee(Config::default())),
             build: Box::new(build),
         }
     }
@@ -161,8 +174,13 @@ impl LanguageServer for Backend {
         self.utf16
             .store(encoding == PositionEncodingKind::UTF16, Ordering::Relaxed);
 
+        // Read before the scanner is built, so the first scan already has it.
+        self.config.store(Arc::new(Config::from_options(
+            params.initialization_options.as_ref(),
+        )));
+
         let (requester, pending) = Engine::pending();
-        let scanner = (self.build)(&root, requester);
+        let scanner = (self.build)(&root, requester, Arc::clone(&self.config));
         let publisher = Arc::new(ClientPublisher {
             client: self.client.clone(),
             utf16: Arc::clone(&self.utf16),
@@ -218,6 +236,31 @@ impl LanguageServer for Backend {
         }
         if let Some(engine) = self.engine() {
             engine.request(Reason::Startup);
+        }
+    }
+
+    async fn did_change_configuration(&self, params: DidChangeConfigurationParams) {
+        // Zed nests the server's settings under its own key; accept either
+        // shape rather than guessing which client is talking.
+        let settings = params
+            .settings
+            .get("package-checker")
+            .unwrap_or(&params.settings);
+        let config = Config::from_options(Some(settings));
+
+        if *self.config.load_full() == config {
+            return;
+        }
+        tracing::info!(
+            online = config.online.enabled,
+            offline = config.offline,
+            "configuration changed"
+        );
+        self.config.store(Arc::new(config));
+
+        // The previous answers were computed under the old configuration.
+        if let Some(engine) = self.engine() {
+            engine.request(Reason::Manual);
         }
     }
 

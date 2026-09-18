@@ -12,6 +12,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+serde_json = "1"
 sha2 = { version = "0.10", default-features = false }
 # 0.8.0 exists in-tree but is marked publish = false; 0.7.0 is the crates.io max.
 zed_extension_api = "0.7"

@@ -81,12 +81,13 @@ async fn main() {
         Backend::new(
             client,
             VERSION.to_owned(),
-            move |_root, requester: Requester| {
+            move |_root, requester: Requester, config| {
                 let database = Arc::clone(&database);
                 let scanner = WorkspaceScanner::new(Extractor::new(), database, move || {
                     // The archives just landed; the scan that was refused can run.
                     requester.request(package_checker::Reason::DatabaseSync);
-                });
+                })
+                .with_config(config);
                 Arc::new(scanner) as Arc<dyn Scanner>
             },
         )

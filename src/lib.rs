@@ -40,6 +40,21 @@ impl zed::Extension for PackageCheckerExtension {
         Self
     }
 
+    /// Hands the server whatever the user put under
+    /// `lsp.package-checker.initialization_options`.
+    ///
+    /// Without this the server's settings are unreachable from Zed: it reads
+    /// them from `initializationOptions` and nothing else forwards them.
+    fn language_server_initialization_options(
+        &mut self,
+        _language_server_id: &LanguageServerId,
+        worktree: &zed::Worktree,
+    ) -> Result<Option<serde_json::Value>> {
+        Ok(LspSettings::for_worktree(SERVER_ID, worktree)
+            .ok()
+            .and_then(|settings| settings.initialization_options))
+    }
+
     fn language_server_command(
         &mut self,
         language_server_id: &LanguageServerId,

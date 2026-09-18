@@ -5,6 +5,7 @@
 //! `docs/RUST-VS-GO.md` holds what the comparison found.
 
 pub mod alloc;
+mod config;
 mod db;
 mod diagnostics;
 mod digits;
@@ -25,6 +26,7 @@ mod span;
 pub mod model;
 pub mod version;
 
+pub use config::Config;
 pub use db::{Database, DbError, Progress, default_root};
 pub use engine::{DEFAULT_DEBOUNCE, Engine, Publisher, Reason, Requester, Scanner};
 pub use extract::{ExtractError, Extractor, SKIP_DIRS, is_manifest_name};

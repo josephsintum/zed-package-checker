@@ -39,7 +39,7 @@ type Extractor struct {
 // is set, and that lives in a plugin-specific config proto which the registry's
 // name-based enabling cannot express.
 func New(opts ...Option) (*Extractor, error) {
-	var cfg config
+	cfg := config{maxInodes: DefaultMaxInodes}
 	for _, opt := range opts {
 		opt(&cfg)
 	}

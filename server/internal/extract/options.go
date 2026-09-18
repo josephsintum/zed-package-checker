@@ -42,9 +42,16 @@ func WithExclude(dirs ...string) Option {
 	return func(c *config) { c.extraSkip = append(c.extraSkip, dirs...) }
 }
 
+// DefaultMaxInodes bounds a walk by default.
+//
+// A default rather than only an option, because the option was never called:
+// the walk ran unbounded on every real scan while the knob to bound it sat
+// unused. The Rust server's equivalent cap is the same number.
+const DefaultMaxInodes = 100_000
+
 // WithMaxInodes caps how many filesystem entries the walk visits, bounding the
 // cost of pointing the scanner at an unexpectedly enormous tree. Zero means no
-// limit.
+// limit; omitted entirely means [DefaultMaxInodes].
 func WithMaxInodes(n int) Option {
 	return func(c *config) { c.maxInodes = n }
 }

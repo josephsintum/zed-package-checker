@@ -12,13 +12,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/josephsintum/zed-package-checker/server/internal/db"
+	"github.com/josephsintum/zed-package-checker/server/internal/fsread"
 	"github.com/josephsintum/zed-package-checker/server/internal/locate"
 	"github.com/josephsintum/zed-package-checker/server/internal/match"
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
@@ -139,7 +139,7 @@ func (s *Scanner) Scan(ctx context.Context, root string) (model.Report, error) {
 	if err != nil {
 		return model.Report{}, fmt.Errorf("match: %w", err)
 	}
-	locateSpans(findings)
+	locateSpans(s.log, findings)
 
 	return model.Report{
 		Root:      root,
@@ -296,7 +296,7 @@ func (s *Scanner) warmInBackground(ctx context.Context, ecosystems []model.Ecosy
 //
 // Each manifest is read at most once, however many of its dependencies are
 // vulnerable.
-func locateSpans(findings []model.Finding) {
+func locateSpans(log *slog.Logger, findings []model.Finding) {
 	parsed := map[string]map[string]model.Anchor{}
 
 	for i := range findings {
@@ -310,7 +310,7 @@ func locateSpans(findings []model.Finding) {
 		if !read {
 			// Cached even when it fails, so an unreadable manifest is not
 			// re-read once per finding.
-			if src, err := os.ReadFile(site.Path); err == nil {
+			if src := fsread.ManifestOrNil(log, site.Path); src != nil {
 				anchors = locator(src, site.Path)
 			}
 			parsed[site.Path] = anchors

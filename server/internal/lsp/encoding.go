@@ -2,10 +2,10 @@ package lsp
 
 import (
 	"bytes"
-	"os"
 
 	"go.lsp.dev/protocol"
 
+	"github.com/josephsintum/zed-package-checker/server/internal/fsread"
 	"github.com/josephsintum/zed-package-checker/server/internal/locate"
 )
 
@@ -22,7 +22,7 @@ import (
 // whole line starting at column zero, which is the same number in both
 // encodings.
 func toUTF16Columns(path string, diagnostics []protocol.Diagnostic) {
-	src, err := os.ReadFile(path)
+	src, err := fsread.Manifest(path)
 	if err != nil {
 		return
 	}

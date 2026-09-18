@@ -1,9 +1,10 @@
 package lsp
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/josephsintum/zed-package-checker/server/internal/fsread"
 )
 
 // summaryMarkers recognise the declaration every manifest of a given kind must
@@ -52,7 +53,9 @@ func summaryAnchorLine(path string) int {
 	// Read whole rather than scan: only the four manifests above reach this and
 	// all of them are small, which avoids both a line-length ceiling on a
 	// minified file and a scan error there is nothing useful to do about.
-	content, err := os.ReadFile(path)
+	// Bounded anyway — "small" is a property of the manifests we mean to read,
+	// not of the ones a cloned repository can contain.
+	content, err := fsread.Manifest(path)
 	if err != nil {
 		return 1
 	}

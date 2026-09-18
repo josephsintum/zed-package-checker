@@ -1,6 +1,6 @@
 id = "package-checker"
 name = "Package Checker"
-description = "Flags vulnerable and malicious dependencies as diagnostics, matched offline against OSV."
+description = "Flags vulnerable and malicious dependencies as diagnostics, from OSV.dev."
 version = "0.0.1"
 schema_version = 1
 authors = ["Joseph Sintum <josephsintum@gmail.com>"]

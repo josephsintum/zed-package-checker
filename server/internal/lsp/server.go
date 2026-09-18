@@ -195,8 +195,11 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 			},
 		},
 		ServerInfo: protocol.ServerInfo{
-			Name:    label,
-			Version: protocol.NewOptional(s.version),
+			Name: label,
+			// Which implementation, not just which version: two servers can run
+			// side by side and a stale binary on PATH is otherwise
+			// indistinguishable from the one you meant to test.
+			Version: protocol.NewOptional(s.version + " (go)"),
 		},
 	}, nil
 }

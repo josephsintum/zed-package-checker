@@ -206,7 +206,10 @@ impl LanguageServer for Backend {
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: diagnostics::name().to_owned(),
-                version: Some(self.version.clone()),
+                // Which implementation, not just which version: two servers can
+                // run side by side and a stale binary on PATH is otherwise
+                // indistinguishable from the one you meant to test.
+                version: Some(format!("{} (rust)", self.version)),
             }),
             // A clangd extension this server does not implement; the
             // negotiated encoding is advertised in `capabilities` instead.

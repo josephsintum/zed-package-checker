@@ -628,6 +628,13 @@ the edit is built, and nothing upstream changed.
 - **Findings are correlated by advisory id**, not by position, wherever the client sends
   `context.diagnostics` — which is what that field is for, and the only correlation that
   survives an edited buffer.
+- **The message names the key**, because a quick fix nobody knows about is one nobody
+  uses. Only where the fix exists *and* has somewhere to be written: `diagnostics` runs
+  the same span lookup the action does, so a transitive dependency anchored in a lockfile
+  is never told to press a key that would do nothing. This is the **first deliberate
+  divergence from the Go server** — it has no code actions, so the same sentence there
+  would be false — and `compare-servers.py`'s `EXPECTED` records it on the wording axis
+  only. Range, severity and code still match exactly across all six fixtures.
 
 **Split out of this stage and still open:**
 

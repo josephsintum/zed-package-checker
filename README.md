@@ -66,7 +66,9 @@ Alongside it:
 - **A quick fix that writes the version for you**, where a published version clears every
   advisory on the package. It rewrites the digits and nothing else, so `^4.17.0` becomes
   `^4.18.0` and a `go.mod`'s `v` prefix survives. Lockfiles are never rewritten — where
-  one pinned the version, the action says so and leaves reinstalling to you.
+  one pinned the version, the action says so and leaves reinstalling to you. The
+  diagnostic names the key that applies it, so the fix is not something you have to know
+  to go looking for.
 - **Download progress.** npm's archive is 205 MB, and the first scan of a JavaScript
   project cannot report anything until it lands, so the wait is reported rather than
   silent.

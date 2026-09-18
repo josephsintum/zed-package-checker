@@ -40,11 +40,23 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
     // that cannot be read still produces diagnostics, just with byte columns.
     let source = crate::read::manifest(path);
 
+    // Which findings a quick fix can actually act on, so the message only
+    // promises one where `action` would offer it. The same parse it does, over
+    // the same text — microseconds, and the alternative is telling the user to
+    // press a key that does nothing.
+    let sightings = match (crate::extract::parser_for(path), source.as_deref()) {
+        (Some(parse), Some(src)) => parse(src, path),
+        _ => Vec::new(),
+    };
+
     let mut out = Vec::with_capacity(findings.len() + 1);
     if let Some(summary) = summary(path, findings, source.as_deref()) {
         out.push(summary);
     }
-    out.extend(findings.iter().map(finding_diagnostic));
+    out.extend(findings.iter().map(|finding| {
+        let fixable = crate::action::version_span(&sightings, finding).is_some();
+        finding_diagnostic(finding, fixable)
+    }));
 
     if encoding == Encoding::Utf16
         && let Some(source) = source.as_deref()
@@ -57,7 +69,7 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
     out
 }
 
-fn finding_diagnostic(finding: &Finding) -> Diagnostic {
+fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
     let worst = finding.worst();
     let anchor = finding.anchor_site();
 
@@ -71,7 +83,7 @@ fn finding_diagnostic(finding: &Finding) -> Diagnostic {
             .ok()
             .map(|href| CodeDescription { href }),
         source: Some(name().to_owned()),
-        message: message_for(finding),
+        message: message_for(finding, fixable),
         ..Default::default()
     };
 
@@ -174,7 +186,19 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
 }
 
 /// The one-line description a diagnostic leads with.
-fn message_for(finding: &Finding) -> String {
+/// The key that runs a quick fix, as the editor most likely binds it.
+///
+/// Named rather than described because "a quick fix is available" tells someone
+/// who does not already know the phrase nothing at all. Read from the machine
+/// the server runs on, which is the editor's machine except over a remote
+/// connection.
+const FIX_KEY: &str = if cfg!(target_os = "macos") {
+    "Cmd+."
+} else {
+    "Ctrl+."
+};
+
+fn message_for(finding: &Finding, fixable: bool) -> String {
     let mut message = String::new();
 
     if finding.malicious() {
@@ -214,6 +238,11 @@ fn message_for(finding: &Finding) -> String {
     }
     if finding.dev() {
         message.push_str(". Development dependency");
+    }
+    // Last, because it is the one clause that is an instruction rather than a
+    // fact, and only where the fix exists and can be written somewhere.
+    if fixable && let Fix::Clears(version) = &finding.fix {
+        message.push_str(&format!(". Press {FIX_KEY} to update to {version}"));
     }
     message
 }
@@ -394,9 +423,9 @@ mod tests {
             ..finding()
         };
         assert!(
-            message_for(&f).ends_with(". Fixed in 4.18.0"),
+            message_for(&f, false).ends_with(". Fixed in 4.18.0"),
             "{}",
-            message_for(&f)
+            message_for(&f, false)
         );
     }
 
@@ -407,7 +436,7 @@ mod tests {
             fix: Fix::Partial,
             ..finding()
         };
-        let message = message_for(&one);
+        let message = message_for(&one, false);
         assert!(
             message.contains(". No published version clears it"),
             "{message}"
@@ -420,7 +449,7 @@ mod tests {
             advisories: vec![advisory("GHSA-1", 7.2), advisory("GHSA-2", 5.0)],
             ..finding()
         };
-        let message = message_for(&several);
+        let message = message_for(&several, false);
         assert!(
             message.contains(". No single version clears all of them"),
             "{message}"
@@ -429,7 +458,7 @@ mod tests {
 
     #[test]
     fn an_unfixed_finding_says_nothing_about_a_fix() {
-        let message = message_for(&finding());
+        let message = message_for(&finding(), false);
         assert!(!message.contains("Fixed in"), "{message}");
         assert!(!message.contains("clears"), "{message}");
     }
@@ -444,12 +473,12 @@ mod tests {
             fix: Fix::Clears("1.25.13".into()),
             ..finding()
         };
-        assert!(message_for(&f).contains(". Fixed in 1.25.13"));
+        assert!(message_for(&f, false).contains(". Fixed in 1.25.13"));
     }
 
     #[test]
     fn a_lockfile_resolved_finding_says_the_manifest_is_not_enough() {
-        let message = message_for(&lockfile_resolved());
+        let message = message_for(&lockfile_resolved(), false);
         assert!(
             message.contains(
                 ". Version comes from the lockfile, so editing this file alone will not clear it"
@@ -460,13 +489,13 @@ mod tests {
 
     #[test]
     fn a_manifest_only_finding_does_not() {
-        assert!(!message_for(&finding()).contains("lockfile"));
+        assert!(!message_for(&finding(), false).contains("lockfile"));
         // Nor does a range-inferred one, which is the other provenance case.
         let ranged = Finding {
             from_range: true,
             ..finding()
         };
-        assert!(!message_for(&ranged).contains("lockfile"));
+        assert!(!message_for(&ranged, false).contains("lockfile"));
     }
 
     #[test]
@@ -474,9 +503,9 @@ mod tests {
         // Both derive from `resolved_elsewhere`, so a diagnostic can never
         // carry the link without the sentence or the other way round.
         for f in [finding(), lockfile_resolved()] {
-            let says = message_for(&f).contains("lockfile");
-            let links = finding_diagnostic(&f).related_information.is_some();
-            assert_eq!(says, links, "{}", message_for(&f));
+            let says = message_for(&f, false).contains("lockfile");
+            let links = finding_diagnostic(&f, false).related_information.is_some();
+            assert_eq!(says, links, "{}", message_for(&f, false));
         }
     }
 
@@ -485,16 +514,19 @@ mod tests {
         // A consumer testing for the key must not be handed `null`, which is
         // what `Option` serialised to before.
         for fix in [Fix::None, Fix::Partial] {
-            let data = finding_diagnostic(&Finding { fix, ..finding() })
+            let data = finding_diagnostic(&Finding { fix, ..finding() }, false)
                 .data
                 .expect("data");
             assert!(data.get("fixedVersion").is_none(), "{data}");
         }
 
-        let data = finding_diagnostic(&Finding {
-            fix: Fix::Clears("4.18.0".into()),
-            ..finding()
-        })
+        let data = finding_diagnostic(
+            &Finding {
+                fix: Fix::Clears("4.18.0".into()),
+                ..finding()
+            },
+            false,
+        )
         .data
         .expect("data");
         assert_eq!(data["fixedVersion"], "4.18.0");
@@ -508,7 +540,7 @@ mod tests {
             reachable: Some(false),
             ..finding()
         };
-        assert!(message_for(&f).starts_with("MALICIOUS: "));
+        assert!(message_for(&f, false).starts_with("MALICIOUS: "));
         assert_eq!(severity_for(&f), DiagnosticSeverity::ERROR);
     }
 
@@ -518,7 +550,7 @@ mod tests {
             dep_groups: vec![DEV_GROUP.to_owned()],
             ..finding()
         };
-        assert!(message_for(&f).ends_with(". Development dependency"));
+        assert!(message_for(&f, false).ends_with(". Development dependency"));
         assert_ne!(severity_for(&f), severity_for(&finding()));
     }
 
@@ -533,5 +565,42 @@ mod tests {
         );
         // With nothing to read, line 1 is the honest fallback.
         assert_eq!(summary_anchor_line(Path::new("/p/package.json"), None), 1);
+    }
+
+    #[test]
+    fn a_fixable_finding_says_which_key_applies_it() {
+        let f = Finding {
+            fix: Fix::Clears("4.18.0".into()),
+            ..finding()
+        };
+        let message = message_for(&f, true);
+        assert!(
+            message.ends_with(&format!(". Press {FIX_KEY} to update to 4.18.0")),
+            "{message}"
+        );
+        // The instruction goes last, after every fact about the finding.
+        assert!(message.contains(". Fixed in 4.18.0"), "{message}");
+    }
+
+    #[test]
+    fn a_finding_with_nowhere_to_write_the_version_promises_nothing() {
+        // A transitive dependency anchored in a lockfile has a verified fix and
+        // no editable span. Naming a key that does nothing is worse than silence.
+        let f = Finding {
+            fix: Fix::Clears("4.18.0".into()),
+            ..finding()
+        };
+        let message = message_for(&f, false);
+        assert!(!message.contains("Press"), "{message}");
+        assert!(message.contains(". Fixed in 4.18.0"), "{message}");
+    }
+
+    #[test]
+    fn no_verified_fix_means_no_instruction_even_where_the_version_is_writable() {
+        for fix in [Fix::Partial, Fix::None] {
+            let f = Finding { fix, ..finding() };
+            let message = message_for(&f, true);
+            assert!(!message.contains("Press"), "{message}");
+        }
     }
 }

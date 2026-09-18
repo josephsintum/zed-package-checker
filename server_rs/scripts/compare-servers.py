@@ -24,12 +24,30 @@ TIMEOUT = 180
 # Known and intended differences in diagnostic *wording*, with the reason.
 # Anything not listed fails.
 #
-# Empty, and worth keeping empty: the two servers agree on every diagnostic
-# across every fixture, down to the range and the message. Scoped to wording
-# regardless of that — range, severity and code are compared with no exception
-# available, because every fixture carries exactly one findings-bearing file and
-# a whole-file whitelist would be a whitelist of everything.
-EXPECTED: dict[tuple[str, str], str] = {}
+# Scoped to wording regardless of what is listed — range, severity and code are
+# compared with no exception available, because every fixture carries exactly
+# one findings-bearing file and a whole-file whitelist would be a whitelist of
+# everything.
+#
+# The list stopped being empty on 2026-09-18, when the Rust server gained the
+# upgrade quick fix. Its message ends by naming the key that applies the fix;
+# the Go server has no code actions, so the same sentence there would point at
+# a key that does nothing. This is the first deliberate divergence between the
+# two, and it is one-directional: the Rust message is the Go message plus a
+# trailing clause. Everything before that clause must still match exactly,
+# which is what keeps this from becoming a licence to drift.
+_QUICK_FIX = "rust names the key that applies its upgrade quick fix; go has no code actions"
+
+# Named one by one rather than matched by pattern: a new fixture must fail
+# before it is whitelisted, not inherit an exemption.
+EXPECTED: dict[tuple[str, str], str] = {
+    ("go-mod", "go.mod"): _QUICK_FIX,
+    ("npm-direct", "package.json"): _QUICK_FIX,
+    ("npm-nolock", "package.json"): _QUICK_FIX,
+    ("npm-range-vs-lock", "package.json"): _QUICK_FIX,
+    ("py-requirements", "requirements.txt"): _QUICK_FIX,
+    ("rust-cargo", "Cargo.toml"): _QUICK_FIX,
+}
 
 
 def drain(stream, sink):

@@ -20,6 +20,12 @@ const BINARY_NAME: &str = "package-checker-lsp";
 /// not by the executable name, so the two must not be conflated.
 const SERVER_ID: &str = "package-checker";
 
+/// The comparison server, declared alongside the first so both can run at once.
+///
+/// It installs nothing: pointing it at a binary is the only way to start it,
+/// which keeps it inert for anyone who has not asked for it.
+const COMPARISON_SERVER_ID: &str = "package-checker-go";
+
 /// Where releases are published.
 const REPO: &str = "josephsintum/zed-package-checker";
 
@@ -60,11 +66,30 @@ impl zed::Extension for PackageCheckerExtension {
         language_server_id: &LanguageServerId,
         worktree: &zed::Worktree,
     ) -> Result<Command> {
-        let path = resolve_binary(language_server_id, worktree)?;
+        let id = language_server_id.as_ref();
+
+        // Two servers can run side by side, and the diagnostics panel tells
+        // them apart by the `source` field rather than by the server's name —
+        // so each is told what to call itself.
+        let mut args = vec!["--stdio".to_owned()];
+        let path = if id == COMPARISON_SERVER_ID {
+            args.push("--label".to_owned());
+            args.push(COMPARISON_SERVER_ID.to_owned());
+            // Never downloaded: a comparison server with no binary configured
+            // is one the user did not ask for.
+            configured_binary(COMPARISON_SERVER_ID, worktree).ok_or_else(|| {
+                format!(
+                    "set lsp.{COMPARISON_SERVER_ID}.binary.path to run the comparison server, \
+                     or remove it from your settings"
+                )
+            })?
+        } else {
+            resolve_binary(language_server_id, worktree)?
+        };
 
         Ok(Command {
             command: path,
-            args: vec!["--stdio".into()],
+            args,
             // The server may shell out to language toolchains (`go` for
             // reachability analysis). A GUI-launched Zed has a minimal PATH, so
             // hand it the user's real shell environment.
@@ -83,10 +108,8 @@ fn resolve_binary(
     language_server_id: &LanguageServerId,
     worktree: &zed::Worktree,
 ) -> Result<String> {
-    if let Ok(settings) = LspSettings::for_worktree(SERVER_ID, worktree) {
-        if let Some(path) = settings.binary.and_then(|binary| binary.path) {
-            return Ok(path);
-        }
+    if let Some(path) = configured_binary(SERVER_ID, worktree) {
+        return Ok(path);
     }
 
     if let Some(path) = worktree.which(BINARY_NAME) {
@@ -99,6 +122,14 @@ fn resolve_binary(
             &LanguageServerInstallationStatus::Failed(err.clone()),
         );
     })
+}
+
+/// The binary a user pointed this server at, if any.
+fn configured_binary(server_id: &str, worktree: &zed::Worktree) -> Option<String> {
+    LspSettings::for_worktree(server_id, worktree)
+        .ok()?
+        .binary?
+        .path
 }
 
 /// Downloads the pinned release for this platform, unless it is already here.

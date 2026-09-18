@@ -14,6 +14,9 @@ use tower_lsp_server::{LspService, Server};
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 struct Options {
+    /// Renames the server in its diagnostics, so two can run side by side and
+    /// be told apart. Testing scaffolding, not a setting.
+    label: Option<String>,
     log_file: Option<PathBuf>,
     debug: bool,
     db_root: Option<PathBuf>,
@@ -21,6 +24,7 @@ struct Options {
 
 fn parse_args() -> Result<Options, String> {
     let mut options = Options {
+        label: None,
         log_file: None,
         debug: false,
         db_root: None,
@@ -35,6 +39,7 @@ fn parse_args() -> Result<Options, String> {
             "-log" | "--log" => options.log_file = args.next().map(Into::into),
             "-debug" | "--debug" => options.debug = true,
             "-db-root" | "--db-root" => options.db_root = args.next().map(Into::into),
+            "-label" | "--label" => options.label = args.next(),
             // Zed passes this; the server speaks stdio and nothing else.
             "-stdio" | "--stdio" => {}
             other => return Err(format!("unrecognised argument {other:?}")),
@@ -52,6 +57,10 @@ async fn main() {
             std::process::exit(2);
         }
     };
+
+    if let Some(label) = options.label {
+        package_checker::set_label(label);
+    }
 
     // Never stdout: that is the JSON-RPC stream.
     let level = if options.debug { "debug" } else { "info" };

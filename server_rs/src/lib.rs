@@ -30,6 +30,7 @@ pub mod version;
 
 pub use config::Config;
 pub use db::{Database, DbError, Progress, default_root};
+pub use diagnostics::set_label;
 pub use engine::{DEFAULT_DEBOUNCE, Engine, Publisher, Reason, Requester, Scanner};
 pub use extract::{ExtractError, Extractor, SKIP_DIRS, is_manifest_name};
 pub use index::Index;

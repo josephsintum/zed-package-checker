@@ -34,7 +34,7 @@ func findingDiagnostic(f model.Finding) protocol.Diagnostic {
 	d := protocol.Diagnostic{
 		Range:    toProtocolRange(anchor.Range),
 		Severity: severityFor(f),
-		Source:   protocol.NewOptional(Name),
+		Source:   protocol.NewOptional(label),
 		Code:     protocol.String(worst.ID),
 		Message:  protocol.String(messageFor(f)),
 		// Round-trips back to us on codeAction, so a fix can be offered without
@@ -105,7 +105,7 @@ func summaryDiagnostic(path string, findings []model.Finding) (protocol.Diagnost
 	return protocol.Diagnostic{
 		Range:    toProtocolRange(model.WholeLine(summaryAnchorLine(path))),
 		Severity: severityLevel(worst, false, nil),
-		Source:   protocol.NewOptional(Name),
+		Source:   protocol.NewOptional(label),
 		Code:     protocol.String("summary"),
 		Message:  protocol.String(message),
 		Data:     encodeData(map[string]any{"summary": true, "path": path}),

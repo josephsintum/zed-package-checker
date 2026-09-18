@@ -7,6 +7,7 @@
 use crate::model::{Finding, Fix, Severity};
 use crate::span::{Encoding, column};
 use std::path::Path;
+use std::sync::OnceLock;
 use tower_lsp_server::ls_types::{
     CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
     NumberOrString, Position, Range, Uri,
@@ -14,6 +15,20 @@ use tower_lsp_server::ls_types::{
 
 /// The `source` field on every diagnostic, and the server's name.
 pub const NAME: &str = "package-checker";
+
+/// Overrides [`NAME`], so two servers can run side by side and be told apart in
+/// the diagnostics panel. Set once from `--label`; unset in a normal build.
+static LABEL: OnceLock<String> = OnceLock::new();
+
+/// Names this server. [`NAME`] unless `--label` said otherwise.
+pub fn name() -> &'static str {
+    LABEL.get().map_or(NAME, String::as_str)
+}
+
+/// Sets the name this server reports. Ignored after the first call.
+pub fn set_label(label: String) {
+    let _ = LABEL.set(label);
+}
 
 /// One file's diagnostics: one per finding, plus a summary when there is more
 /// than one thing wrong.
@@ -55,7 +70,7 @@ fn finding_diagnostic(finding: &Finding) -> Diagnostic {
             .parse::<Uri>()
             .ok()
             .map(|href| CodeDescription { href }),
-        source: Some(NAME.to_owned()),
+        source: Some(name().to_owned()),
         message: message_for(finding),
         ..Default::default()
     };
@@ -151,7 +166,7 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
         range: to_range(crate::model::Range::whole_line(line)),
         severity: Some(severity_level(worst, false, None)),
         code: Some(NumberOrString::String("summary".to_owned())),
-        source: Some(NAME.to_owned()),
+        source: Some(name().to_owned()),
         message,
         data: Some(serde_json::json!({ "summary": true, "path": path.to_string_lossy() })),
         ..Default::default()

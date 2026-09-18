@@ -42,9 +42,11 @@ func run() error {
 		logPath     = flag.String("log", "", "also write logs to this file")
 		debug       = flag.Bool("debug", false, "log at debug level")
 		dbRoot      = flag.String("db-root", "", "advisory cache directory (default: the OS cache dir)")
+		label       = flag.String("label", "", "name this server reports in its diagnostics (testing)")
 	)
 	flag.Bool("stdio", true, "communicate over stdio (default, accepted for compatibility)")
 	flag.Parse()
+	lsp.SetLabel(*label)
 
 	if *showVersion {
 		fmt.Println(version)

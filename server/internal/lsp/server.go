@@ -27,6 +27,17 @@ import (
 // of every diagnostic this server publishes.
 const Name = "package-checker"
 
+// label overrides Name, so two servers can run side by side and be told apart
+// in the diagnostics panel. Testing scaffolding, not a setting.
+var label = Name
+
+// SetLabel names this server in its diagnostics. Call before serving.
+func SetLabel(name string) {
+	if name != "" {
+		label = name
+	}
+}
+
 // manifestNames are files a change to which can alter what a project depends
 // on.
 //
@@ -184,7 +195,7 @@ func (s *Server) Initialize(ctx context.Context, params *protocol.InitializePara
 			},
 		},
 		ServerInfo: protocol.ServerInfo{
-			Name:    Name,
+			Name:    label,
 			Version: protocol.NewOptional(s.version),
 		},
 	}, nil

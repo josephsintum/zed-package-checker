@@ -6,7 +6,7 @@
 //! with "method not found".
 
 use crate::config::Config;
-use crate::diagnostics::{self, NAME};
+use crate::diagnostics;
 use crate::engine::{Engine, Publisher, Reason, Requester};
 use crate::model::Finding;
 use crate::span::Encoding;
@@ -205,7 +205,7 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: NAME.to_owned(),
+                name: diagnostics::name().to_owned(),
                 version: Some(self.version.clone()),
             }),
             // A clangd extension this server does not implement; the

@@ -30,10 +30,13 @@ pub enum ScanError {
     Load(#[from] crate::load::LoadError),
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error(transparent)]
+    Api(#[from] crate::api::ApiError),
 }
 
 pub struct WorkspaceScanner {
     extractor: Extractor,
+    api: crate::api::ApiSource,
     /// Shared with the LSP layer, which swaps it on `didChangeConfiguration`.
     config: Arc<ArcSwap<crate::config::Config>>,
     database: Arc<Database>,
@@ -53,9 +56,11 @@ impl WorkspaceScanner {
         database: Arc<Database>,
         on_ready: impl Fn() + Send + Sync + 'static,
     ) -> WorkspaceScanner {
+        let config = Arc::new(ArcSwap::from_pointee(crate::config::Config::default()));
         WorkspaceScanner {
             extractor,
-            config: Arc::new(ArcSwap::from_pointee(crate::config::Config::default())),
+            api: crate::api::ApiSource::new(database.root(), Arc::clone(&config)),
+            config,
             database,
             index: Arc::new(ArcSwapOption::empty()),
             warming: Arc::new(AtomicBool::new(false)),
@@ -67,6 +72,7 @@ impl WorkspaceScanner {
     /// Shares the live configuration with the LSP layer.
     #[must_use]
     pub fn with_config(mut self, config: Arc<ArcSwap<crate::config::Config>>) -> Self {
+        self.api = crate::api::ApiSource::new(self.database.root(), Arc::clone(&config));
         self.config = config;
         self
     }
@@ -130,6 +136,40 @@ impl WorkspaceScanner {
     }
 }
 
+impl WorkspaceScanner {
+    /// Matches against advisories fetched for these packages specifically.
+    ///
+    /// The index this builds is complete for every package that has a finding,
+    /// which is what `Matcher::fix_for` needs to verify a candidate upgrade.
+    /// Where `api` could not establish that for a package, the fix is withheld
+    /// rather than guessed — see [`crate::api`]'s module documentation.
+    fn online(
+        &self,
+        root: &Path,
+        packages: &[crate::model::ExtractedPackage],
+        ecosystems: &[Ecosystem],
+    ) -> Result<Report, ScanError> {
+        let started = std::time::Instant::now();
+        let fetched = self.api.advisories(packages)?;
+
+        tracing::info!(
+            packages = packages.len(),
+            advisories = fetched.advisories.len(),
+            elapsed_ms = started.elapsed().as_millis(),
+            "matched against osv.dev; names and versions only left this machine"
+        );
+
+        let index = Index::build(fetched.advisories, ecosystems.to_vec(), started.elapsed());
+        let mut findings = Matcher::new(&index).findings(packages);
+        for finding in &mut findings {
+            if fetched.partial.contains(&finding.package.key) {
+                finding.fix = crate::model::Fix::None;
+            }
+        }
+        Ok(Report::new(root, findings))
+    }
+}
+
 impl Scanner for WorkspaceScanner {
     fn scan(&self, root: &Path) -> anyhow::Result<Report> {
         let packages = self.extractor.extract(root)?;
@@ -141,13 +181,31 @@ impl Scanner for WorkspaceScanner {
         }
 
         let ecosystems = ecosystems_of(&packages);
-        if !self.database.ready(&ecosystems) {
-            self.warm(ecosystems);
-            return Err(ScanError::NotReady.into());
+
+        // The archive is authoritative when it is here: it answers offline, it
+        // covers packages the API was never asked about, and it costs nothing
+        // per scan once loaded.
+        if self.database.ready(&ecosystems) {
+            let index = self.index_for(&ecosystems)?;
+            let findings = Matcher::new(&index).findings(&packages);
+            return Ok(Report::new(root, findings));
         }
 
-        let index = self.index_for(&ecosystems)?;
-        let findings = Matcher::new(&index).findings(&packages);
-        Ok(Report::new(root, findings))
+        // Nothing on disk. Asking about the few hundred packages in hand beats
+        // waiting for every advisory for every package that exists.
+        let config = self.config.load_full();
+        if config.online.enabled && !config.offline {
+            match self.online(root, &packages, &ecosystems) {
+                Ok(report) => return Ok(report),
+                Err(error) => {
+                    tracing::warn!(%error, "falling back to the advisory archive");
+                }
+            }
+        }
+
+        if !config.offline {
+            self.warm(ecosystems);
+        }
+        Err(ScanError::NotReady.into())
     }
 }

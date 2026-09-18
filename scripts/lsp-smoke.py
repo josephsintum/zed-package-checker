@@ -93,6 +93,9 @@ def main() -> int:
                          "exercise the cold first run and its $/progress")
     ap.add_argument("--require-progress", action="store_true",
                     help="fail unless the server reported download progress")
+    ap.add_argument("--options", metavar="JSON",
+                    help="initializationOptions to send, e.g. "
+                         "'{\"online\":{\"enabled\":false}}'")
     args = ap.parse_args()
 
     root = pathlib.Path(args.root).resolve()
@@ -103,6 +106,12 @@ def main() -> int:
     cmd = [args.binary, "--stdio"]
     if args.db_root:
         cmd += ["--db-root", args.db_root]
+
+    try:
+        options = json.loads(args.options) if args.options else None
+    except json.JSONDecodeError as err:
+        print(f"--options is not valid JSON: {err}", file=sys.stderr)
+        return 2
 
     proc = subprocess.Popen(
         cmd,
@@ -129,6 +138,7 @@ def main() -> int:
             "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
             # Claim UTF-8 support so the encoding negotiation is exercised.
             "capabilities": {"general": {"positionEncodings": ["utf-8", "utf-16"]}},
+            "initializationOptions": options,
         },
     }))
     proc.stdin.flush()

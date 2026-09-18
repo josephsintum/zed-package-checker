@@ -5,6 +5,7 @@
 //! `docs/RUST-VS-GO.md` holds what the comparison found.
 
 pub mod alloc;
+mod api;
 mod config;
 mod db;
 mod diagnostics;

@@ -59,10 +59,15 @@ def read_message(proc):
     return json.loads(proc.stdout.read(length))
 
 
-def publish(binary, root):
-    """Every diagnostic the server publishes for one fixture, keyed by file."""
+def publish(binary, root, db_root=None):
+    """Every diagnostic the server publishes for one fixture, keyed by file.
+
+    `db_root` points the server at a specific advisory cache — an empty one
+    exercises the cold path, which is how compare-sources.py tells the archive
+    and the API apart.
+    """
     proc = subprocess.Popen(
-        [str(binary), "--stdio"],
+        [str(binary), "--stdio"] + (["--db-root", str(db_root)] if db_root else []),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     errors = []

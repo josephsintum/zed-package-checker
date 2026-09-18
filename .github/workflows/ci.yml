@@ -58,6 +58,28 @@ jobs:
       - name: Build
         run: make server
 
+  server-rs:
+    name: Rust server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Through the Makefile, not by spelling the commands out again: a
+      # contributor running `make lint-rs` green must not still fail here.
+      # `server_rs` is its own workspace, so the root `cargo fmt` does not
+      # reach it — `make fmt` and `make lint-rs` are what do.
+      - name: Lint
+        run: make lint-rs
+
+      # tests/differential.rs skips unless tests/corpus/ordering.tsv is present,
+      # and it is generated from 252 MB of archives rather than committed. The
+      # comparator gate is a local one; this job covers everything else.
+      - name: Test
+        run: make test-rs
+
+      - name: Build
+        run: make server-rs
+
   extension:
     name: Extension shim
     runs-on: ubuntu-latest

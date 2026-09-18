@@ -1,6 +1,7 @@
 # zed-package-checker
 
 SERVER_DIR := server
+RUST_DIR   := server_rs
 BINARY     := package-checker-lsp
 DIST       := $(SERVER_DIR)/dist
 VERSION    ?= dev
@@ -23,7 +24,7 @@ GOLANGCI   := $(if $(wildcard $(GOPATH_BIN)/golangci-lint),$(GOPATH_BIN)/golangc
 RELEASE_TARGETS := darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64
 RELEASE_DIR     := $(DIST)/release
 
-.PHONY: all server harness dbcheck scanharness extension release-binaries test test-race test-differential lint lint-tools fmt tidy clean help
+.PHONY: all server server-rs harness dbcheck scanharness extension release-binaries test test-rs test-race test-differential lint lint-rs lint-tools fmt tidy clean help
 
 all: server extension ## Build both halves
 
@@ -31,6 +32,10 @@ server: ## Build the language server for this machine
 	cd $(SERVER_DIR) && CGO_ENABLED=0 go build -trimpath \
 		-ldflags "$(GO_LDFLAGS)" -o dist/$(BINARY) ./cmd/$(BINARY)
 	@echo "built $(DIST)/$(BINARY)"
+
+server-rs: ## Build the Rust server (see server_rs/docs/RUST-VS-GO.md)
+	cd $(RUST_DIR) && cargo build --release
+	@echo "built $(RUST_DIR)/target/release/$(BINARY)"
 
 harness: ## Build the extraction harness (development only)
 	cd $(SERVER_DIR) && go build -o dist/extractharness ./cmd/extractharness
@@ -67,6 +72,9 @@ release-binaries: ## Cross-compile every release target, with checksums
 test: ## Run Go tests with the race detector
 	cd $(SERVER_DIR) && go test -race ./...
 
+test-rs: ## Run the Rust server's tests
+	cd $(RUST_DIR) && cargo test
+
 test-race: ## Hammer the concurrency tests (the Stage 7 gate)
 	cd $(SERVER_DIR) && go test -race -count=100 ./internal/engine/...
 
@@ -83,19 +91,24 @@ lint: ## Vet the Go module and run golangci-lint
 		echo "install it with: make lint-tools"; \
 	fi
 
+lint-rs: ## Check formatting and lint the Rust server
+	cd $(RUST_DIR) && cargo fmt --check
+	cd $(RUST_DIR) && cargo clippy --all-targets -- -D warnings
+
 lint-tools: ## Install golangci-lint, built against this machine's Go
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 	@echo "installed to $$(go env GOPATH)/bin/golangci-lint"
 
-fmt: ## Format both languages
+fmt: ## Format every tree
 	cd $(SERVER_DIR) && gofmt -w .
 	cargo fmt
+	cd $(RUST_DIR) && cargo fmt
 
 tidy: ## Tidy Go module dependencies
 	cd $(SERVER_DIR) && go mod tidy
 
 clean: ## Remove build output
-	rm -rf $(DIST) target
+	rm -rf $(DIST) target $(RUST_DIR)/target
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \

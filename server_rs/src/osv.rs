@@ -58,6 +58,8 @@ struct OsvPackage<'a> {
 
 #[derive(Deserialize)]
 struct OsvRange<'a> {
+    #[serde(rename = "type", borrow, default)]
+    kind: Cow<'a, str>,
     #[serde(borrow, default)]
     events: Vec<OsvEvent<'a>>,
 }
@@ -118,6 +120,14 @@ impl<'a> OsvAdvisory<'a> {
     }
 }
 
+fn boxed(s: &str) -> Box<str> {
+    // Exactly sized: no spare capacity is retained for the life of the index.
+    Box::from(s)
+}
+
+/// A range whose bounds are commit hashes rather than versions.
+const GIT_RANGE: &str = "GIT";
+
 /// Turns OSV's event timelines into explicit ranges.
 ///
 /// A range is a sequence of events along one version timeline rather than a pair
@@ -128,14 +138,15 @@ impl<'a> OsvAdvisory<'a> {
 /// This is the subtlest transformation in the program and the one most able to
 /// be confidently wrong — pairing an event with the wrong introduction makes an
 /// advisory match versions it does not affect.
-fn boxed(s: &str) -> Box<str> {
-    // Exactly sized: no spare capacity is retained for the life of the index.
-    Box::from(s)
-}
-
+///
+/// `GIT` ranges are dropped, because their bounds are forty hex characters and
+/// both comparators accept every input rather than rejecting one — a commit
+/// hash would be silently ordered as a version, and offered as a fix. Only that
+/// type is dropped, so a range whose type is absent or unrecognised is still
+/// indexed: this can lose a hash, never an advisory.
 fn flatten_ranges(ranges: &[OsvRange<'_>]) -> Box<[AffectedRange]> {
     let mut out = Vec::new();
-    for range in ranges {
+    for range in ranges.iter().filter(|r| r.kind != GIT_RANGE) {
         let mut current = AffectedRange::default();
         let mut open = false;
 
@@ -190,4 +201,85 @@ fn cvss(severities: &[OsvSeverity<'_>]) -> (f64, Box<str>) {
         return (parsed.score().value(), Box::from(vector));
     }
     (0.0, Box::from(""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode(json: &str, want: Ecosystem) -> Option<Advisory> {
+        serde_json::from_str::<OsvAdvisory<'_>>(json)
+            .expect("well-formed OSV")
+            .into_model(want)
+    }
+
+    /// Shaped on PYSEC-2018-28, which carries both kinds of range for the same
+    /// package: a commit hash and a version.
+    const BOTH_RANGE_KINDS: &str = r#"{
+        "id": "PYSEC-2018-28",
+        "affected": [{
+            "package": {"ecosystem": "PyPI", "name": "requests"},
+            "ranges": [
+                {"type": "GIT", "events": [
+                    {"introduced": "0"},
+                    {"fixed": "c45d7c49ea75133e52ab22a8e9e13173938e36ff"}
+                ]},
+                {"type": "ECOSYSTEM", "events": [
+                    {"introduced": "0"},
+                    {"fixed": "2.20.0"}
+                ]}
+            ]
+        }]
+    }"#;
+
+    #[test]
+    fn a_git_range_is_dropped_and_the_version_range_kept() {
+        let advisory = decode(BOTH_RANGE_KINDS, Ecosystem::PyPI).expect("indexed");
+        let ranges = &advisory.affected[0].ranges;
+        assert_eq!(ranges.len(), 1, "the GIT range must not be indexed");
+        assert_eq!(&*ranges[0].fixed, "2.20.0");
+
+        // The consequence that matters: a commit hash can never be offered as
+        // a fixed version.
+        let key = crate::model::PackageKey::new(Ecosystem::PyPI, "requests");
+        assert_eq!(advisory.fixed_versions_for(&key), ["2.20.0"]);
+    }
+
+    #[test]
+    fn a_range_with_no_type_is_still_indexed() {
+        // Only GIT is dropped, so an absent or unrecognised type can never
+        // cost us an advisory.
+        let advisory = decode(
+            r#"{
+                "id": "GHSA-x",
+                "affected": [{
+                    "package": {"ecosystem": "npm", "name": "lodash"},
+                    "ranges": [{"events": [{"introduced": "0"}, {"fixed": "4.17.21"}]}]
+                }]
+            }"#,
+            Ecosystem::Npm,
+        )
+        .expect("indexed");
+        assert_eq!(advisory.affected[0].ranges.len(), 1);
+    }
+
+    #[test]
+    fn an_affected_entry_with_only_a_git_range_keeps_no_ranges() {
+        // OSV-2021-449 and OSV-2025-500 are the two PyPI advisories shaped this
+        // way. With no version bound left they match nothing, which is right —
+        // a commit range cannot be evaluated against a PyPI version.
+        let advisory = decode(
+            r#"{
+                "id": "OSV-2021-449",
+                "affected": [{
+                    "package": {"ecosystem": "PyPI", "name": "tensorflow"},
+                    "ranges": [{"type": "GIT", "events": [{"introduced": "0"}, {"fixed": "abc123"}]}]
+                }]
+            }"#,
+            Ecosystem::PyPI,
+        )
+        .expect("indexed");
+        assert!(advisory.affected[0].ranges.is_empty());
+        assert!(advisory.affected[0].versions.is_empty());
+    }
 }

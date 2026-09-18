@@ -224,6 +224,7 @@ mod tests {
             declared: None,
             dep_groups: Vec::new(),
             from_range: false,
+            version_span: None,
         }
     }
 

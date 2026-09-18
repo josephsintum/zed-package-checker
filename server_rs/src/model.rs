@@ -252,11 +252,6 @@ impl Anchor {
             version: None,
         }
     }
-
-    pub fn with_version(mut self, version: Site) -> Self {
-        self.version = Some(version);
-        self
-    }
 }
 
 /// Marks advisories from the OpenSSF malicious-packages feed.
@@ -428,6 +423,21 @@ pub struct ExtractedPackage {
     /// The version came from resolving a range, not from reading a pin, so the
     /// installed version may differ.
     pub from_range: bool,
+    /// Where the version literal is written — no operator, no quotes — so a
+    /// code action can rewrite it. `None` for lockfiles, which are never
+    /// rewritten, and wherever the offset cannot be trusted.
+    ///
+    /// Read only by the code action handler, which re-parses the one file it is
+    /// acting on; nothing carries this through `reconcile` into a `Finding`.
+    pub version_span: Option<Range>,
+}
+
+impl ExtractedPackage {
+    /// Records where the version literal is written, when it can be located.
+    pub fn with_version_span(mut self, span: Option<Range>) -> Self {
+        self.version_span = span;
+        self
+    }
 }
 
 /// Every distinct ecosystem among the extracted packages, sorted.

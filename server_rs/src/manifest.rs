@@ -38,7 +38,18 @@ fn sighting(
         declared: None,
         dep_groups,
         from_range,
+        // Set by `with_version_span` where the version can be rewritten.
+        version_span: None,
     }
+}
+
+/// Byte offset of a subslice within the string it was sliced from.
+///
+/// Pointer arithmetic rather than a search: searching finds the wrong
+/// occurrence whenever a package name contains its own version text.
+fn offset_in(whole: &str, part: &str) -> usize {
+    debug_assert!(part.as_ptr() as usize >= whole.as_ptr() as usize);
+    part.as_ptr() as usize - whole.as_ptr() as usize
 }
 
 // ---------------------------------------------------------------- package.json
@@ -64,32 +75,50 @@ pub fn package_json(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             let Value::StringLit(constraint) = &prop.value else {
                 continue;
             };
-            let Some(version) = lowest_satisfying(&constraint.value) else {
+            let Some((version, at, to)) = lowest_satisfying(&constraint.value) else {
                 continue;
             };
-            out.push(sighting(
-                Ecosystem::Npm,
-                name,
-                version,
-                path,
-                lines.range(range.0, range.1),
-                group.map(str::to_owned).into_iter().collect(),
-                // A manifest states a constraint, never an installed version,
-                // so everything here is inferred until a lockfile says otherwise.
-                true,
-            ));
+            // The literal's range includes the quotes; the value inside starts
+            // one byte in. `value` is the *decoded* string, so an escape would
+            // put the span somewhere else in the file — checked, not assumed,
+            // since a wrong span here rewrites the wrong bytes.
+            let (at, to) = (
+                constraint.range.start + 1 + at,
+                constraint.range.start + 1 + to,
+            );
+            let version_span = (src.get(at..to) == Some(version)).then(|| lines.range(at, to));
+            out.push(
+                sighting(
+                    Ecosystem::Npm,
+                    name,
+                    version,
+                    path,
+                    lines.range(range.0, range.1),
+                    group.map(str::to_owned).into_iter().collect(),
+                    // A manifest states a constraint, never an installed version,
+                    // so everything here is inferred until a lockfile says otherwise.
+                    true,
+                )
+                .with_version_span(version_span),
+            );
         }
     }
     out
 }
 
 /// The lowest version a constraint admits, which is what is scanned when there
-/// is no lockfile to say what is installed.
+/// is no lockfile to say what is installed, and its byte span within the
+/// constraint.
 ///
 /// `^4.17.15` becomes `4.17.15`. Anything naming a protocol rather than a
 /// version — `workspace:*`, `file:../x`, a git URL — is not a version at all and
 /// yields nothing, because the digits inside a URL are not a version number.
-fn lowest_satisfying(constraint: &str) -> Option<&str> {
+///
+/// The span covers the digits alone. Leaving the operator out is what lets
+/// `>=1.0.0 <2.0.0` be bumped to `>=1.4.0 <2.0.0` rather than losing its upper
+/// bound, and means no operator ever has to be reconstructed.
+fn lowest_satisfying(constraint: &str) -> Option<(&str, usize, usize)> {
+    let lead = constraint.len() - constraint.trim_start().len();
     let constraint = constraint.trim();
     if constraint.contains(':') || constraint.contains('/') {
         return None;
@@ -107,7 +136,7 @@ fn lowest_satisfying(constraint: &str) -> Option<&str> {
         .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+')))
         .map(|i| start + i)
         .unwrap_or(constraint.len());
-    Some(&constraint[start..end])
+    Some((&constraint[start..end], lead + start, lead + end))
 }
 
 // ----------------------------------------------------------- package-lock.json
@@ -136,6 +165,9 @@ pub fn package_lock(src: &str, path: &Path) -> Vec<ExtractedPackage> {
 }
 
 /// The flat `packages` map of lockfile versions 2 and 3.
+///
+/// No version span: rewriting a lockfile means rewriting integrity hashes and
+/// resolved URLs, so no edit is ever offered against one.
 fn lock_packages(packages: &Object<'_>, path: &Path, lines: &LineIndex) -> Vec<ExtractedPackage> {
     let mut out = Vec::new();
     for prop in &packages.properties {
@@ -174,7 +206,8 @@ fn lock_packages(packages: &Object<'_>, path: &Path, lines: &LineIndex) -> Vec<E
     out
 }
 
-/// The nested `dependencies` tree of lockfile version 1.
+/// The nested `dependencies` tree of lockfile version 1. No version span, for
+/// the reason [`lock_packages`] gives.
 fn lock_tree(deps: &Object<'_>, path: &Path, lines: &LineIndex, out: &mut Vec<ExtractedPackage>) {
     for prop in &deps.properties {
         let Some((name, range)) = prop_name(&prop.name) else {
@@ -256,15 +289,19 @@ pub fn go_mod(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             let version = version.trim();
             // Declaration and version are the same token: `go 1.21` names no
             // package, so pointing at the keyword would underline nothing.
-            out.push(sighting(
-                Ecosystem::Go,
-                crate::model::GO_TOOLCHAIN,
-                version,
-                path,
-                lines.range(start + column, start + column + version.len()),
-                Vec::new(),
-                false,
-            ));
+            let span = lines.range(start + column, start + column + version.len());
+            out.push(
+                sighting(
+                    Ecosystem::Go,
+                    crate::model::GO_TOOLCHAIN,
+                    version,
+                    path,
+                    span,
+                    Vec::new(),
+                    false,
+                )
+                .with_version_span(Some(span)),
+            );
         }
     }
     out
@@ -293,18 +330,25 @@ fn require_line(
         return None;
     }
     let column = full_line.find(module)?;
-    Some(sighting(
-        Ecosystem::Go,
-        module,
-        // OSV records Go versions without the `v` the module file writes.
-        version.trim_start_matches('v'),
-        path,
-        lines.range(start + column, start + column + module.len()),
-        // `// indirect` is a graph fact, not a dependency group; the Go server
-        // does not treat it as one either.
-        Vec::new(),
-        false,
-    ))
+    // The span starts after the `v`, so a rewrite replaces `v1.2.3` with
+    // `v1.4.0` rather than dropping the prefix go.mod requires.
+    let version_at = offset_in(full_line, version) + 1;
+    let version_span = lines.range(start + version_at, start + version_at + version.len() - 1);
+    Some(
+        sighting(
+            Ecosystem::Go,
+            module,
+            // OSV records Go versions without the `v` the module file writes.
+            &version[1..],
+            path,
+            lines.range(start + column, start + column + module.len()),
+            // `// indirect` is a graph fact, not a dependency group; the Go server
+            // does not treat it as one either.
+            Vec::new(),
+            false,
+        )
+        .with_version_span(Some(version_span)),
+    )
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -356,21 +400,30 @@ pub fn cargo_toml(src: &str, path: &Path) -> Vec<ExtractedPackage> {
         let Some((name, name_span, version)) = cargo_dependency(line) else {
             continue;
         };
-        found[index].push(sighting(
-            Ecosystem::CratesIo,
-            name,
-            version,
-            path,
-            lines.range(start + name_span.0, start + name_span.1),
-            CARGO_SECTIONS[index]
-                .1
-                .map(str::to_owned)
-                .into_iter()
-                .collect(),
-            // Cargo versions are constraints — `"0.1.44"` means `^0.1.44` — so
-            // what is installed comes from the lockfile, never from here.
-            true,
-        ));
+        // A Cargo version is a requirement string, so the span is narrowed to
+        // the digits the same way npm's is: `">=1.0, <2.0"` keeps its upper
+        // bound when the lower one is bumped.
+        let version_at = start + offset_in(line, version);
+        let version_span =
+            lowest_satisfying(version).map(|(_, a, b)| lines.range(version_at + a, version_at + b));
+        found[index].push(
+            sighting(
+                Ecosystem::CratesIo,
+                name,
+                version,
+                path,
+                lines.range(start + name_span.0, start + name_span.1),
+                CARGO_SECTIONS[index]
+                    .1
+                    .map(str::to_owned)
+                    .into_iter()
+                    .collect(),
+                // Cargo versions are constraints — `"0.1.44"` means `^0.1.44` — so
+                // what is installed comes from the lockfile, never from here.
+                true,
+            )
+            .with_version_span(version_span),
+        );
     }
     found.into_iter().flatten().collect()
 }
@@ -399,7 +452,8 @@ pub fn cargo_self(src: &str) -> Option<String> {
     None
 }
 
-/// Locked crate versions from a `Cargo.lock`.
+/// Locked crate versions from a `Cargo.lock`. No version span, for the reason
+/// [`lock_packages`] gives.
 pub fn cargo_lock(src: &str, path: &Path) -> Vec<ExtractedPackage> {
     let lines = LineIndex::new(src);
     let mut out = Vec::new();
@@ -577,7 +631,11 @@ pub fn requirements(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             (std::mem::take(&mut pending), pending_start)
         };
 
-        if let Some(found) = requirement(&whole, whole_start, path, &lines) {
+        // `whole` is a fresh string when lines were joined, so its offsets no
+        // longer refer to the file. The evidence span already drifts here; the
+        // version span is simply withheld rather than pointing somewhere wrong.
+        let contiguous = whole_start == start;
+        if let Some(found) = requirement(&whole, whole_start, path, &lines, contiguous) {
             out.push(found);
         }
     }
@@ -589,6 +647,7 @@ fn requirement(
     start: usize,
     path: &Path,
     lines: &LineIndex,
+    contiguous: bool,
 ) -> Option<ExtractedPackage> {
     // Comments, options and includes.
     let body = line.split('#').next()?.trim_end();
@@ -617,17 +676,24 @@ fn requirement(
     let (comparator, version) = specifier(rest)?;
     let column = line.find(name)?;
 
-    Some(sighting(
-        Ecosystem::PyPI,
-        name,
-        version,
-        path,
-        lines.range(start + column, start + column + name.len()),
-        Vec::new(),
-        // Only `==` and `===` name an installed version; everything else is a
-        // constraint whose lowest satisfying version is a guess.
-        !matches!(comparator, "==" | "==="),
-    ))
+    let version_span = contiguous.then(|| {
+        let at = start + offset_in(line, version);
+        lines.range(at, at + version.len())
+    });
+    Some(
+        sighting(
+            Ecosystem::PyPI,
+            name,
+            version,
+            path,
+            lines.range(start + column, start + column + name.len()),
+            Vec::new(),
+            // Only `==` and `===` name an installed version; everything else is a
+            // constraint whose lowest satisfying version is a guess.
+            !matches!(comparator, "==" | "==="),
+        )
+        .with_version_span(version_span),
+    )
 }
 
 /// The first version specifier in a requirement, as (comparator, version).
@@ -870,5 +936,82 @@ mod conformance {
                 assert_eq!(found.evidence.path, path);
             }
         }
+    }
+    /// The byte range a span covers, for slicing the source back out.
+    fn slice(src: &str, range: crate::model::Range) -> &str {
+        &src[offset_of(src, range.start)..offset_of(src, range.end)]
+    }
+
+    #[test]
+    fn a_version_span_covers_exactly_the_version_it_reported() {
+        // The invariant the upgrade quick fix rests on: replacing the span with
+        // a new version must leave everything around it — quotes, operators,
+        // go.mod's `v` — untouched.
+        for (name, parse, sample) in PARSERS {
+            for found in parse(sample, &path_for(name)) {
+                let Some(span) = found.version_span else {
+                    continue;
+                };
+                assert_eq!(
+                    slice(sample, span),
+                    found.package.version.as_ref(),
+                    "{name} span covers the wrong text"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lockfiles_offer_no_version_span() {
+        // Rewriting a lockfile means rewriting integrity hashes and resolved
+        // URLs, so no edit is ever offered against one.
+        for (name, parse, sample) in PARSERS {
+            if !name.contains("lock") {
+                continue;
+            }
+            for found in parse(sample, &path_for(name)) {
+                assert!(found.version_span.is_none(), "{name} offered a span");
+            }
+        }
+    }
+
+    #[test]
+    fn a_span_excludes_the_operator_so_a_bound_survives_a_bump() {
+        let src = "{\n  \"dependencies\": {\n    \"a\": \"^4.17.0\",\n    \"b\": \">=1.0.0 <2.0.0\"\n  }\n}\n";
+        let found = package_json(src, &path_for("package.json"));
+        let spans: Vec<&str> = found
+            .iter()
+            .map(|f| slice(src, f.version_span.unwrap()))
+            .collect();
+        assert_eq!(spans, vec!["4.17.0", "1.0.0"]);
+    }
+
+    #[test]
+    fn a_cargo_span_excludes_the_operator_too() {
+        let src = "[dependencies]\nserde = \"^1.0.1\"\ntime = { version = \">=0.1.44\", features = [] }\n";
+        let found = cargo_toml(src, &path_for("Cargo.toml"));
+        let spans: Vec<&str> = found
+            .iter()
+            .map(|f| slice(src, f.version_span.unwrap()))
+            .collect();
+        assert_eq!(spans, vec!["1.0.1", "0.1.44"]);
+    }
+
+    #[test]
+    fn a_go_span_starts_after_the_v() {
+        let src = "require (\n\tgithub.com/x/y v1.6.0 // indirect\n)\n";
+        let found = go_mod(src, &path_for("go.mod"));
+        assert_eq!(slice(src, found[0].version_span.unwrap()), "1.6.0");
+    }
+
+    #[test]
+    fn a_continued_requirement_withholds_its_span() {
+        // Joined lines are reassembled into a new string, so offsets past the
+        // first physical line no longer refer to the file.
+        let src = "requests==2.19.1\nflask\\\n==1.0.0\n";
+        let found = requirements(src, &path_for("requirements.txt"));
+        assert_eq!(found.len(), 2);
+        assert_eq!(slice(src, found[0].version_span.unwrap()), "2.19.1");
+        assert!(found[1].version_span.is_none());
     }
 }

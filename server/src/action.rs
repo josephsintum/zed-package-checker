@@ -83,7 +83,7 @@ fn selects<'a>(params: &'a CodeActionParams, finding: &Finding) -> Option<Option
         .context
         .diagnostics
         .iter()
-        .filter(|d| d.source.as_deref() == Some(diagnostics::name()))
+        .filter(|d| d.source.as_deref() == Some(diagnostics::NAME))
         .collect();
     if ours.is_empty() {
         let anchor = finding.anchor_site().range;
@@ -238,7 +238,7 @@ mod tests {
             context: CodeActionContext {
                 diagnostics: vec![Diagnostic {
                     range,
-                    source: Some(diagnostics::name().to_owned()),
+                    source: Some(diagnostics::NAME.to_owned()),
                     code: Some(NumberOrString::String("GHSA-1".to_owned())),
                     ..Default::default()
                 }],
@@ -398,15 +398,17 @@ mod tests {
     }
 
     #[test]
-    fn a_name_in_two_sections_is_only_edited_where_the_diagnostic_sits() {
+    fn a_name_in_two_sections_is_only_edited_where_it_ships() {
+        // The parser attributes a package to its production section, so the
+        // finding sits there and the dev declaration is left alone.
         let src = "{\n  \"dependencies\": {\n    \"lodash\": \"4.17.15\"\n  },\n  \"devDependencies\": {\n    \"lodash\": \"3.0.0\"\n  }\n}\n";
         let sightings = crate::manifest::package_json(src, Path::new("/p/package.json"));
-        assert_eq!(sightings.len(), 2);
+        assert_eq!(sightings.len(), 1);
 
         let mut f = finding("lodash", Fix::Clears("4.18.0".into()));
-        f.evidence = sightings[1].evidence.clone();
+        f.evidence = sightings[0].evidence.clone();
         let actions = act(src, std::slice::from_ref(&f), &params(&f));
-        assert_eq!(applied(src, &actions[0]), src.replace("3.0.0", "4.18.0"));
+        assert_eq!(applied(src, &actions[0]), src.replace("4.17.15", "4.18.0"));
     }
 
     #[test]

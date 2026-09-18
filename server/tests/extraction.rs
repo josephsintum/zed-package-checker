@@ -1,5 +1,5 @@
-//! Extraction against the fixtures the Go server uses, asserting the exact
-//! editor-visible span for every dependency.
+//! Extraction against the fixture projects under `testdata/`, asserting the
+//! exact editor-visible span for every dependency.
 //!
 //! Positions are zero-based, as LSP wants them, and columns are byte offsets —
 //! the encoding the server negotiates when the client allows it.
@@ -125,9 +125,9 @@ fn a_crate_is_not_a_dependency_of_itself() {
 
 #[test]
 fn requirements_get_exact_spans() {
-    // The Go server anchors these on the whole line: `scan.locatorFor` returns
-    // no locator for requirements.txt. Here the parser that finds the
-    // dependency is the one that knows where it is.
+    // The parser that finds the dependency is the one that knows where it is,
+    // so even a free-form requirements line gets a name-width span rather than
+    // the whole line.
     assert_eq!(
         extract("py-requirements"),
         [

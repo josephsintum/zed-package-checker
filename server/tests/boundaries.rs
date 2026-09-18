@@ -1,9 +1,8 @@
 //! The dependency rule `model.rs` claims for itself, checked.
 //!
-//! The Go server states the same property as a package boundary and enforces it
-//! with `internal/arch`, which walks every package's imports. Module privacy
-//! gives most of that for free here, but not this: `model` is a module in the
-//! same crate as `db` and `lsp`, so nothing stops it reaching for either. The
+//! Module privacy enforces most dependency boundaries in this crate for free,
+//! but not this one: `model` is a module in the same crate as `db` and `lsp`,
+//! so nothing stops it reaching for either. The
 //! rule matters because `model` is the vocabulary every other module speaks,
 //! and a domain type that drags in the protocol or the network is one the
 //! others cannot use without them.

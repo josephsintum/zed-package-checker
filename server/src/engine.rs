@@ -1,13 +1,9 @@
 //! Deciding *when* to scan, and what to publish.
 //!
 //! One task owns every piece of mutable state; everything else talks to it over
-//! a channel. Same actor shape as the Go server's `internal/engine`, for the
-//! same reason: it is race-free by construction rather than by discipline.
-//!
-//! Two things differ. Supersession here aborts the in-flight scan rather than
-//! asking it to notice, so the `ctx.Err()` polls the Go loader needs every 256
-//! packages and every 512 zip entries have no counterpart. And the compiler
-//! enforces what `-race` and `goleak` are there to check for.
+//! a channel — the actor shape, because it is race-free by construction rather
+//! than by discipline. Supersession aborts the in-flight scan rather than asking
+//! it to notice, so nothing in the scan path polls for cancellation.
 
 use crate::model::{Finding, Report};
 use std::collections::{HashMap, HashSet};
@@ -46,6 +42,9 @@ impl Reason {
 /// Produces a report for a workspace. Implemented by `crate::scan`.
 pub trait Scanner: Send + Sync + 'static {
     fn scan(&self, root: &Path) -> anyhow::Result<Report>;
+
+    /// Stops background work. Called once, when the engine shuts down.
+    fn shutdown(&self) {}
 }
 
 /// Sends diagnostics to the client. Implemented by the LSP layer.
@@ -69,9 +68,8 @@ enum Message {
 /// Asks for a scan without holding the engine.
 ///
 /// The scanner needs to request a rescan when a background download finishes,
-/// and the engine needs the scanner — a cycle that Go breaks with a closure over
-/// a variable assigned later. Here the channel exists before either end does,
-/// which is the same trick without the window in which the variable is nil.
+/// and the engine needs the scanner — a cycle. The channel exists before either
+/// end does, so there is no window in which one side holds an empty handle.
 #[derive(Clone)]
 pub struct Requester {
     tx: mpsc::Sender<Message>,
@@ -97,8 +95,18 @@ impl PendingEngine {
         publisher: Arc<dyn Publisher>,
         debounce: Duration,
     ) -> Engine {
-        let task = tokio::spawn(run(root, scanner, publisher, debounce, self.rx));
-        Engine { tx: self.tx, task }
+        let task = tokio::spawn(run(
+            root,
+            Arc::clone(&scanner),
+            publisher,
+            debounce,
+            self.rx,
+        ));
+        Engine {
+            tx: self.tx,
+            task,
+            scanner,
+        }
     }
 }
 
@@ -106,6 +114,7 @@ impl PendingEngine {
 pub struct Engine {
     tx: mpsc::Sender<Message>,
     task: JoinHandle<()>,
+    scanner: Arc<dyn Scanner>,
 }
 
 impl Engine {
@@ -149,11 +158,18 @@ impl Engine {
         answer.await.unwrap_or_default()
     }
 
+    /// Stops the scanner's background work without stopping the scheduler,
+    /// for a `shutdown` request that cannot take the engine by value.
+    pub fn stop_background(&self) {
+        self.scanner.shutdown();
+    }
+
     /// Stops the scheduler and waits for it. Dropping the handle is enough to
     /// stop it; this exists so shutdown is deterministic.
     pub async fn shutdown(self) {
         drop(self.tx);
         let _ = self.task.await;
+        self.scanner.shutdown();
     }
 }
 
@@ -344,6 +360,8 @@ mod tests {
         findings: Mutex<Vec<Finding>>,
         /// Held while a scan is "running", so a test can supersede one.
         block: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        /// When set, every scan fails.
+        failing: std::sync::atomic::AtomicBool,
     }
 
     impl Scanner for Arc<FakeScanner> {
@@ -351,6 +369,9 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = self.block.lock().unwrap().take() {
                 let _ = gate.recv();
+            }
+            if self.failing.load(Ordering::SeqCst) {
+                anyhow::bail!("database unavailable");
             }
             Ok(Report::new(root, self.findings.lock().unwrap().clone()))
         }
@@ -380,11 +401,14 @@ mod tests {
         (scanner, recorder, engine)
     }
 
+    /// Long enough for the debounce to elapse and a scan to publish. The
+    /// tests run with time paused, so this costs nothing real and is not a
+    /// race against the machine.
     async fn settle() {
         tokio::time::sleep(DEBOUNCE * 5).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn many_requests_inside_the_window_cause_one_scan() {
         let (scanner, _, engine) = harness(vec![finding("/project/package.json")]);
         for _ in 0..40 {
@@ -395,7 +419,7 @@ mod tests {
         engine.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_report_is_published_per_file() {
         let (_, recorder, engine) = harness(vec![
             finding("/project/package.json"),
@@ -410,7 +434,7 @@ mod tests {
         engine.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_file_that_becomes_clean_is_published_empty() {
         let (scanner, recorder, engine) = harness(vec![finding("/project/package.json")]);
         engine.request(Reason::Startup);
@@ -430,7 +454,7 @@ mod tests {
         engine.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_deleted_manifest_is_cleared_without_waiting_for_a_scan() {
         let (_, recorder, engine) = harness(vec![finding("/project/package.json")]);
         engine.request(Reason::Startup);
@@ -446,7 +470,7 @@ mod tests {
         engine.shutdown().await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn findings_are_readable_without_rescanning() {
         let (scanner, _, engine) = harness(vec![finding("/project/package.json")]);
         engine.request(Reason::Startup);
@@ -467,6 +491,8 @@ mod tests {
         engine.shutdown().await;
     }
 
+    // Real time: the paused clock does not advance while a blocking scan is
+    // held open, and this test holds one open on purpose.
     #[tokio::test]
     async fn a_superseded_scan_never_publishes() {
         let scanner = Arc::new(FakeScanner::default());
@@ -496,5 +522,62 @@ mod tests {
             "only the winning scan publishes, got {published:?}"
         );
         engine.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_scan_keeps_the_previous_diagnostics() {
+        // Clearing on failure would tell the user the project became clean,
+        // which is not what a failed scan means.
+        let (scanner, recorder, engine) = harness(vec![finding("/project/package.json")]);
+        engine.request(Reason::Startup);
+        settle().await;
+        assert_eq!(recorder.published.lock().unwrap().len(), 1);
+
+        scanner.failing.store(true, Ordering::SeqCst);
+        engine.request(Reason::FileChanged);
+        settle().await;
+
+        assert_eq!(
+            scanner.calls.load(Ordering::SeqCst),
+            2,
+            "the failing scan ran"
+        );
+        assert_eq!(
+            recorder.published.lock().unwrap().len(),
+            1,
+            "a failed scan published something"
+        );
+        assert_eq!(
+            engine
+                .findings(PathBuf::from("/project/package.json"))
+                .await
+                .len(),
+            1,
+            "findings were dropped on failure"
+        );
+        engine.shutdown().await;
+    }
+
+    // Real time: the paused clock does not advance while a blocking scan is
+    // held open, and this test holds one open on purpose.
+    #[tokio::test]
+    async fn shutdown_returns_while_a_scan_is_in_flight() {
+        let scanner = Arc::new(FakeScanner::default());
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        *scanner.block.lock().unwrap() = Some(gate);
+        let engine = Engine::start(
+            PathBuf::from("/project"),
+            Arc::new(Arc::clone(&scanner)),
+            Arc::new(Arc::new(Recorder::default())),
+            DEBOUNCE,
+        );
+
+        engine.request(Reason::Startup);
+        tokio::time::sleep(DEBOUNCE * 2).await; // the scan is now stuck
+        assert_eq!(scanner.calls.load(Ordering::SeqCst), 1);
+
+        let stopped = tokio::time::timeout(Duration::from_secs(2), engine.shutdown()).await;
+        drop(release);
+        assert!(stopped.is_ok(), "shutdown hung with a scan in flight");
     }
 }

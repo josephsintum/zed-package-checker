@@ -15,8 +15,8 @@ use std::time::SystemTime;
 
 /// An OSV ecosystem.
 ///
-/// A closed enum rather than the wrapped string the Go server uses. The set is
-/// fixed by what the extractors can parse, so making it closed turns "did you
+/// A closed enum rather than a wrapped string. The set is fixed by what the
+/// parsers can read, so making it closed turns "did you
 /// handle crates.io?" from a code review question into a compile error.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Ecosystem {
@@ -337,10 +337,9 @@ pub struct Affected {
 /// There is deliberately no `details` field. It is full Markdown prose
 /// averaging 662 bytes, and across npm's 229k advisories it accounted for 151 MB
 /// of a 257 MB index — more than half, to render hover text for the two or three
-/// advisories a project actually matches. The Go server carries the field and
-/// leaves it empty by convention; omitting it makes that a property of the type
-/// instead, so it cannot be populated by accident. `Database::details` reads it
-/// back from the archive on demand.
+/// advisories a project actually matches. Omitting the field makes that a
+/// property of the type, so it cannot be populated by accident.
+/// `Database::details` reads it back from the archive on demand.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Advisory {
     /// The primary OSV identifier, e.g. `GHSA-p6mc-m468-83gw`.
@@ -450,8 +449,7 @@ pub fn ecosystems_of(packages: &[ExtractedPackage]) -> Vec<Ecosystem> {
 
 /// A vulnerable dependency and the advisories that apply to it.
 ///
-/// Advisories are shared rather than copied: one `Arc` bump per finding instead
-/// of the struct copy the Go server makes for every affected package.
+/// Advisories are shared rather than copied: one `Arc` bump per finding.
 #[derive(Clone, Debug)]
 pub struct Finding {
     pub package: Package,

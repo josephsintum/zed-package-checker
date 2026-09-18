@@ -8,10 +8,9 @@ use std::time::{Duration, SystemTime};
 /// scan. Immutable once built, which is what lets it be shared across tasks
 /// behind an `Arc` with no lock on the read path.
 ///
-/// Advisories are stored once, contiguously. The Go index is
-/// `map[PackageKey][]Advisory`, which copies a 144-byte header into a separately
-/// allocated slice for every package an advisory affects; here an advisory lives
-/// in one `Vec` and the per-package lists are index ranges into a second one.
+/// Advisories are stored once, contiguously: an advisory lives in one `Vec`
+/// and the per-package lists are index ranges into a second one, rather than a
+/// per-package slice holding a copy of every advisory that names it.
 #[derive(Debug, Default)]
 pub struct Index {
     advisories: Vec<Advisory>,
@@ -72,9 +71,7 @@ impl Index {
 
     /// Every advisory that names this package, in archive order.
     ///
-    /// Borrowed from the arena: no copy, no per-key allocation. The Go index
-    /// returns a slice that was built by appending a struct copy per affected
-    /// package while loading.
+    /// Borrowed from the arena: no copy, no per-key allocation.
     pub fn lookup(&self, key: &PackageKey) -> impl Iterator<Item = &Advisory> {
         let postings = match self.by_package.get(key) {
             Some(&(start, len)) => &self.postings[start as usize..(start + len) as usize],

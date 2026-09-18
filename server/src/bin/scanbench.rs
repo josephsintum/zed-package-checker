@@ -1,8 +1,7 @@
 //! Times a scan against a real tree, phase by phase.
 //!
-//! The Go server's `cmd/scanharness` equivalent, and `dbcheck`'s sibling: the
-//! database is what `dbcheck` measures, and this is everything the editor pays
-//! on *every* debounce rather than once per refresh.
+//! `dbcheck`'s sibling: the database is what `dbcheck` measures, and this is
+//! everything the editor pays on *every* debounce rather than once per refresh.
 //!
 //! The walk is re-implemented here rather than instrumented in `extract`,
 //! because measurement scaffolding does not belong in the server. That means

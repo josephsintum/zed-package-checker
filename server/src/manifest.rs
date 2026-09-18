@@ -43,6 +43,17 @@ fn sighting(
     }
 }
 
+/// Keeps the first sighting of each package, so a package declared in several
+/// sections is attributed to the one that ships. Callers emit sections in
+/// preference order.
+fn first_per_name(found: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
+    let mut seen = std::collections::HashSet::new();
+    found
+        .into_iter()
+        .filter(|f| seen.insert(f.package.key.clone()))
+        .collect()
+}
+
 /// Byte offset of a subslice within the string it was sliced from.
 ///
 /// Pointer arithmetic rather than a search: searching finds the wrong
@@ -103,7 +114,7 @@ pub fn package_json(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             );
         }
     }
-    out
+    first_per_name(out)
 }
 
 /// The lowest version a constraint admits, which is what is scanned when there
@@ -246,14 +257,50 @@ fn lock_groups(entry: &Object<'_>) -> Vec<String> {
 
 // --------------------------------------------------------------------- go.mod
 
-/// The Go toolchain, reported against the `go` directive.
+/// A `replace` directive: which module it rewrites, and to what.
+struct Replace<'a> {
+    old: &'a str,
+    /// `None` replaces every version of `old`.
+    old_version: Option<&'a str>,
+    /// `None` for a filesystem path, which has no version to look up.
+    new: Option<(&'a str, &'a str)>,
+}
+
+/// `old [v] => new [v]`, the body of a replace directive.
+fn replace_line(body: &str) -> Option<Replace<'_>> {
+    let (old, new) = body.split_once("=>")?;
+    let mut old = old.split_whitespace();
+    let old_path = old.next()?;
+    let old_version = old.next().map(|v| v.strip_prefix('v').unwrap_or(v));
+    let mut new = new.split_whitespace();
+    let new_path = new.next()?;
+    let new = new
+        .next()
+        .map(|v| (new_path, v.strip_prefix('v').unwrap_or(v)));
+    Some(Replace {
+        old: old_path,
+        old_version,
+        new,
+    })
+}
+
+/// Dependencies declared in a `go.mod`.
 ///
-/// That directive is a *minimum*, not the toolchain in use, and the diagnostic
-/// says so.
+/// The toolchain is reported too, against the `toolchain` directive when there
+/// is one and the `go` directive otherwise. The latter is a *minimum*, not the
+/// toolchain in use, and the diagnostic says so.
+///
+/// `replace` directives are applied: the build uses the replacement, so
+/// matching the original would report advisories against code that is not
+/// there and miss the ones that are. A replacement by filesystem path has no
+/// version to look up, and drops the module.
 pub fn go_mod(src: &str, path: &Path) -> Vec<ExtractedPackage> {
     let lines = LineIndex::new(src);
     let mut out = Vec::new();
-    let mut in_require_block = false;
+    let mut replaces = Vec::new();
+    let mut go_directive = None;
+    let mut toolchain = None;
+    let mut block: Option<&str> = None;
     let mut offset = 0usize;
 
     for line in src.split_inclusive('\n') {
@@ -262,47 +309,93 @@ pub fn go_mod(src: &str, path: &Path) -> Vec<ExtractedPackage> {
         let text = strip_comment(line);
         let trimmed = text.trim();
 
-        if in_require_block {
+        if let Some(keyword) = block {
             if trimmed == ")" {
-                in_require_block = false;
-                continue;
-            }
-            if let Some(found) = require_line(text, start, path, &lines) {
-                out.push(found);
-            }
-            continue;
-        }
-
-        if let Some(rest) = trimmed.strip_prefix("require") {
-            let rest = rest.trim_start();
-            if rest == "(" {
-                in_require_block = true;
-            } else if let Some(found) = require_line(text, start, path, &lines) {
-                out.push(found);
+                block = None;
+            } else if keyword == "require" {
+                out.extend(require_line(text, start, path, &lines));
+            } else {
+                replaces.extend(replace_line(trimmed));
             }
             continue;
         }
 
+        for keyword in ["require", "replace"] {
+            if let Some(rest) = trimmed.strip_prefix(keyword)
+                && rest.starts_with(|c: char| c.is_whitespace())
+            {
+                let rest = rest.trim_start();
+                if rest == "(" {
+                    block = Some(keyword);
+                } else if keyword == "require" {
+                    out.extend(require_line(text, start, path, &lines));
+                } else {
+                    replaces.extend(replace_line(rest));
+                }
+            }
+        }
+
+        // Declaration and version are the same token: `go 1.21` names no
+        // package, so pointing at the keyword would underline nothing.
         if let Some(version) = trimmed.strip_prefix("go ")
             && let Some(column) = text.find(version.trim())
         {
             let version = version.trim();
-            // Declaration and version are the same token: `go 1.21` names no
-            // package, so pointing at the keyword would underline nothing.
-            let span = lines.range(start + column, start + column + version.len());
-            out.push(
-                sighting(
+            go_directive = Some((version, start + column));
+        }
+        if let Some(name) = trimmed.strip_prefix("toolchain ")
+            && let Some(column) = text.find(name.trim())
+        {
+            // `go1.21.5`, or `go1.21.5-something` for a custom build.
+            let name = name.trim();
+            let version = name.split('-').next().unwrap_or(name);
+            let version = version.strip_prefix("go").unwrap_or(version);
+            let at = start + column + (name.len() - name.trim_start_matches("go").len());
+            toolchain = Some((version, at));
+        }
+    }
+
+    let mut out: Vec<ExtractedPackage> = out
+        .into_iter()
+        .filter_map(|found| {
+            let applicable = replaces.iter().find(|r| {
+                r.old == found.package.name()
+                    && r.old_version
+                        .is_none_or(|v| v == found.package.version.as_ref())
+            });
+            match applicable {
+                None => Some(found),
+                Some(Replace { new: None, .. }) => None,
+                Some(Replace {
+                    new: Some((name, version)),
+                    ..
+                }) => Some(sighting(
                     Ecosystem::Go,
-                    crate::model::GO_TOOLCHAIN,
+                    name,
                     version,
                     path,
-                    span,
+                    found.evidence.range,
                     Vec::new(),
                     false,
-                )
-                .with_version_span(Some(span)),
-            );
-        }
+                )),
+            }
+        })
+        .collect();
+
+    if let Some((version, at)) = toolchain.or(go_directive) {
+        let span = lines.range(at, at + version.len());
+        out.push(
+            sighting(
+                Ecosystem::Go,
+                crate::model::GO_TOOLCHAIN,
+                version,
+                path,
+                span,
+                Vec::new(),
+                false,
+            )
+            .with_version_span(Some(span)),
+        );
     }
     out
 }
@@ -342,8 +435,7 @@ fn require_line(
             &version[1..],
             path,
             lines.range(start + column, start + column + module.len()),
-            // `// indirect` is a graph fact, not a dependency group; the Go server
-            // does not treat it as one either.
+            // `// indirect` is a graph fact, not a dependency group.
             Vec::new(),
             false,
         )
@@ -365,7 +457,7 @@ fn strip_comment(line: &str) -> &str {
 ///
 /// Matched on the header's last dotted component, so a target-specific table
 /// such as `[target.'cfg(unix)'.dependencies]` is recognised. A sub-table like
-/// `[dependencies.serde]` is not, which matches the Go server.
+/// `[dependencies.serde]` is not.
 const CARGO_SECTIONS: [(&str, Option<&str>); 3] = [
     ("dependencies", None),
     ("build-dependencies", Some("build")),
@@ -374,9 +466,9 @@ const CARGO_SECTIONS: [(&str, Option<&str>); 3] = [
 
 /// Dependencies declared in a `Cargo.toml`.
 ///
-/// Line-based rather than parsed, for the same reason the Go locator is: a TOML
-/// decoder hands back values without telling you where they were written, and
-/// the position is the point. Only the shapes that carry a version are read.
+/// Line-based rather than parsed: a TOML decoder hands back values without
+/// telling you where they were written, and the position is the point. Only the
+/// shapes that carry a version are read.
 pub fn cargo_toml(src: &str, path: &Path) -> Vec<ExtractedPackage> {
     let lines = LineIndex::new(src);
     // Collected per section so the preference order can be applied afterwards,
@@ -425,7 +517,7 @@ pub fn cargo_toml(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             .with_version_span(version_span),
         );
     }
-    found.into_iter().flatten().collect()
+    first_per_name(found.into_iter().flatten().collect())
 }
 
 /// The crate a `Cargo.toml` declares as its own, so a project is not reported
@@ -673,6 +765,11 @@ fn requirement(
         None => rest,
     };
 
+    // A version guessed from an upper bound, an exclusion or a wildcard would
+    // be a false positive; only a lower bound or a pin is worth a lookup.
+    if unsupported_constraint(rest) {
+        return None;
+    }
     let (comparator, version) = specifier(rest)?;
     let column = line.find(name)?;
 
@@ -694,6 +791,34 @@ fn requirement(
         )
         .with_version_span(version_span),
     )
+}
+
+/// Whether a specifier names no single lowest version: a wildcard, an
+/// exclusion, an upper bound alone, or a list.
+fn unsupported_constraint(spec: &str) -> bool {
+    spec.contains('*')
+        || spec.contains(',')
+        || spec.contains("!=")
+        || spec
+            .match_indices('<')
+            .any(|(i, _)| spec.as_bytes().get(i + 1) != Some(&b'='))
+}
+
+/// The files a requirements file pulls in with `-r`, as written.
+///
+/// Listed rather than read here, because the parsers touch no filesystem; the
+/// extractor resolves and follows them.
+pub fn requirement_includes(src: &str) -> Vec<String> {
+    src.lines()
+        .filter_map(|line| {
+            let line = line.split('#').next()?.trim();
+            line.strip_prefix("-r ")
+                .or_else(|| line.strip_prefix("--requirement "))
+                .or_else(|| line.strip_prefix("--requirement="))
+        })
+        .map(|target| target.trim().to_owned())
+        .filter(|target| !target.is_empty())
+        .collect()
 }
 
 /// The first version specifier in a requirement, as (comparator, version).
@@ -1013,5 +1138,163 @@ mod conformance {
         assert_eq!(found.len(), 2);
         assert_eq!(slice(src, found[0].version_span.unwrap()), "2.19.1");
         assert!(found[1].version_span.is_none());
+    }
+}
+
+#[cfg(test)]
+mod behaviour {
+    use super::*;
+
+    fn at(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from("/p").join(name)
+    }
+
+    fn names_and_versions(found: &[ExtractedPackage]) -> Vec<(String, String)> {
+        found
+            .iter()
+            .map(|f| (f.package.name().to_owned(), f.package.version.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn go_mod_replace_substitutes_name_and_version() {
+        // The build uses the replacement, so matching the original would
+        // report advisories against code that is not there and miss the ones
+        // that are.
+        let src = "module m\n\nrequire example.com/old v1.0.0\n\nreplace example.com/old => example.com/fork v1.2.0\n";
+        let found = go_mod(src, &at("go.mod"));
+        assert_eq!(
+            names_and_versions(&found),
+            [("example.com/fork".into(), "1.2.0".into())]
+        );
+        // The require line is still where the user acts.
+        assert_eq!(found[0].evidence.range.start.line, 2);
+        // Rewriting the require's version would not change what is built.
+        assert!(found[0].version_span.is_none());
+    }
+
+    #[test]
+    fn go_mod_replace_with_a_version_applies_only_to_that_version() {
+        let src = "module m\n\nrequire example.com/a v1.0.0\n\nreplace example.com/a v2.0.0 => example.com/b v2.1.0\n";
+        let found = go_mod(src, &at("go.mod"));
+        assert_eq!(
+            names_and_versions(&found),
+            [("example.com/a".into(), "1.0.0".into())]
+        );
+    }
+
+    #[test]
+    fn go_mod_replace_to_a_local_path_drops_the_module() {
+        // A directory has no version to look up, and the advisory for the
+        // published module says nothing about a local copy.
+        let src = "module m\n\nrequire (\n\texample.com/old v1.0.0\n\texample.com/kept v2.0.0\n)\n\nreplace example.com/old => ../old\n";
+        let found = go_mod(src, &at("go.mod"));
+        assert_eq!(
+            names_and_versions(&found),
+            [("example.com/kept".into(), "2.0.0".into())]
+        );
+    }
+
+    #[test]
+    fn go_mod_replace_block_is_read() {
+        let src = "module m\n\nrequire example.com/a v1.0.0\n\nreplace (\n\texample.com/a => example.com/b v1.5.0\n)\n";
+        let found = go_mod(src, &at("go.mod"));
+        assert_eq!(
+            names_and_versions(&found),
+            [("example.com/b".into(), "1.5.0".into())]
+        );
+    }
+
+    #[test]
+    fn go_mod_toolchain_wins_over_the_go_directive() {
+        // `go` is a minimum; `toolchain` is what actually builds the module,
+        // and the stdlib advisories apply to that.
+        let src = "module m\n\ngo 1.21\n\ntoolchain go1.21.5\n";
+        let found = go_mod(src, &at("go.mod"));
+        assert_eq!(
+            names_and_versions(&found),
+            [("stdlib".into(), "1.21.5".into())]
+        );
+        assert_eq!(
+            found[0].evidence.range.start.line, 4,
+            "anchored on the toolchain line"
+        );
+    }
+
+    #[test]
+    fn go_mod_module_itself_is_not_a_dependency() {
+        let found = go_mod("module example.com/fixture\n\ngo 1.21\n", &at("go.mod"));
+        assert!(
+            found
+                .iter()
+                .all(|f| f.package.name() != "example.com/fixture")
+        );
+    }
+
+    #[test]
+    fn package_json_production_wins_over_dev() {
+        // A package migrating between sections appears in both. The diagnostic
+        // has to land on one, and the production declaration is the one that
+        // ships.
+        let src = "{\n  \"dependencies\": {\n    \"lodash\": \"^4.17.0\"\n  },\n  \"devDependencies\": {\n    \"lodash\": \"^3.0.0\"\n  }\n}\n";
+        let found = package_json(src, &at("package.json"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].evidence.range.start.line, 2);
+        assert!(
+            found[0].dep_groups.is_empty(),
+            "the production declaration has no group"
+        );
+    }
+
+    #[test]
+    fn package_json_non_dependency_sections_are_ignored() {
+        let src = "{\n  \"scripts\": {\n    \"lodash\": \"echo not a dependency\"\n  },\n  \"engines\": {\n    \"node\": \">=18\"\n  }\n}\n";
+        assert!(package_json(src, &at("package.json")).is_empty());
+    }
+
+    #[test]
+    fn requirements_of_only_comments_yield_nothing() {
+        assert!(requirements("# nothing here\n\n  \n", &at("requirements.txt")).is_empty());
+    }
+
+    #[test]
+    fn requirements_with_unsupported_constraints_name_no_version() {
+        // A version guessed from an upper bound, an exclusion or a wildcard is
+        // a false positive; only a lower bound or a pin is worth a lookup.
+        let src = "requests<2.0\nflask!=1.0\nnumpy==*\ndjango>=1,<2\nkept>=1.0\npinned==2.0\n";
+        let found = requirements(src, &at("requirements.txt"));
+        assert_eq!(
+            names_and_versions(&found),
+            [
+                ("kept".into(), "1.0".into()),
+                ("pinned".into(), "2.0".into())
+            ]
+        );
+    }
+
+    #[test]
+    fn requirement_includes_are_listed() {
+        let src =
+            "-r base.txt\n--requirement ../shared/common.txt\n-c constraints.txt\nrequests==2.0\n";
+        assert_eq!(
+            requirement_includes(src),
+            ["base.txt", "../shared/common.txt"]
+        );
+    }
+
+    #[test]
+    fn cargo_toml_ignores_the_package_table() {
+        // [package] names the project, not something it depends on.
+        let src = "[package]\nname = \"fixture\"\nversion = \"1.0.0\"\n";
+        assert!(cargo_toml(src, &at("Cargo.toml")).is_empty());
+    }
+
+    #[test]
+    fn cargo_toml_prefers_the_production_declaration() {
+        let src = "[dev-dependencies]\ntime = \"0.2\"\n\n[dependencies]\ntime = \"0.1.44\"\n";
+        let found = cargo_toml(src, &at("Cargo.toml"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].evidence.range.start.line, 4);
+        assert!(found[0].dep_groups.is_empty());
     }
 }

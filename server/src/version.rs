@@ -1,17 +1,16 @@
 //! Per-ecosystem version ordering.
 //!
-//! The Go server delegates this to `osv-scalibr/semantic`. No Rust crate
-//! implements that comparator, and the obvious candidates are not substitutes:
-//! the `semver` crate rejects `1.2`, a leading `v`, and `1.2.3.4`, all of which
-//! appear in real advisories; and `pep440_rs` rejects 3,185 of the version
-//! strings the PyPI archive actually contains, because scalibr implements
-//! PEP 440 *plus* a setuptools-era legacy fallback. Both comparators are
-//! therefore ported here, and checked against scalibr's own answers over
-//! 116,082 real comparisons by `tests/differential.rs`.
+//! The reference is osv-scalibr's `semantic` package, the comparator the OSV
+//! ecosystem's own tooling uses. No Rust crate implements it, and the obvious
+//! candidates are not substitutes: the `semver` crate rejects `1.2`, a leading
+//! `v`, and `1.2.3.4`, all of which appear in real advisories; and `pep440_rs`
+//! rejects 3,185 of the version strings the PyPI archive actually contains,
+//! because scalibr implements PEP 440 *plus* a setuptools-era legacy fallback.
+//! Both comparators are therefore ported here, and checked against scalibr's
+//! recorded answers over 116,142 real comparisons by `tests/differential.rs`.
 //!
-//! Versions borrow their input and are parsed once, then compared many times.
-//! The Go matcher re-parses the installed version for every advisory bound it
-//! checks, and allocates a `big.Int` per component while doing it.
+//! Versions borrow their input and are parsed once, then compared many times,
+//! with no allocation per comparison.
 
 use crate::model::Ecosystem;
 use crate::pypi::PyPiVersion;

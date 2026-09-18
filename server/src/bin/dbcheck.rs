@@ -1,10 +1,8 @@
 //! Times the advisory database against the archives already on disk.
 //!
-//! The Go server's `cmd/dbcheck` equivalent, deliberately reporting the same
-//! things so the two can be put side by side. Peak memory is left to
-//! `/usr/bin/time -l` rather than measured from inside: a cross-language memory
-//! claim has to come from the kernel, not from two different allocators' own
-//! accounting.
+//! Peak memory is left to `/usr/bin/time -l` rather than measured from inside:
+//! a memory claim worth comparing across processes has to come from the kernel,
+//! not from an allocator's own accounting.
 
 #[cfg(feature = "count-alloc")]
 use package_checker::alloc::{Counting, live_bytes};

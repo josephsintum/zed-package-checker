@@ -185,4 +185,175 @@ mod tests {
         assert_eq!(describe(0, Some(215_232_640)), "0.0 MB of 205.3 MB");
         assert_eq!(describe(1_048_576, None), "1.0 MB");
     }
+
+    /// Scans nothing: these tests are about the wire, not the workspace.
+    struct Idle;
+
+    impl crate::engine::Scanner for Idle {
+        fn scan(&self, root: &std::path::Path) -> anyhow::Result<crate::model::Report> {
+            Ok(crate::model::Report::new(root, Vec::new()))
+        }
+    }
+
+    struct Wired {
+        progress: ClientProgress,
+        client: crate::testing::FakeClient,
+        /// Held so the fake editor keeps answering.
+        _service: tower_lsp_server::LspService<crate::lsp::Backend>,
+        _root: tempfile::TempDir,
+    }
+
+    /// A reporter wired to an initialised server over a fake editor: the
+    /// client sends nothing before the lifecycle says it may.
+    async fn reporter() -> Wired {
+        let slot: std::sync::Arc<Mutex<Option<Client>>> = Default::default();
+        let captured = std::sync::Arc::clone(&slot);
+        let (mut service, client) = crate::testing::FakeClient::serve(move |client| {
+            *captured.lock().unwrap() = Some(client.clone());
+            crate::lsp::Backend::new(client, "test".into(), |_, _, _| std::sync::Arc::new(Idle))
+        });
+        let root = tempfile::tempdir().unwrap();
+        let params = tower_lsp_server::ls_types::InitializeParams {
+            workspace_folders: Some(vec![tower_lsp_server::ls_types::WorkspaceFolder {
+                uri: format!("file://{}", root.path().display()).parse().unwrap(),
+                name: String::new(),
+            }]),
+            ..Default::default()
+        };
+        crate::testing::FakeClient::call(&mut service, "initialize", 1, params).await;
+        crate::testing::FakeClient::notify(
+            &mut service,
+            "initialized",
+            tower_lsp_server::ls_types::InitializedParams {},
+        )
+        .await;
+        let lsp_client = slot.lock().unwrap().take().unwrap();
+        Wired {
+            progress: ClientProgress::new(lsp_client, Handle::current()),
+            client,
+            _service: service,
+            _root: root,
+        }
+    }
+
+    fn kinds(client: &crate::testing::FakeClient) -> Vec<String> {
+        client
+            .params_of("$/progress")
+            .iter()
+            .map(|p| p["value"]["kind"].as_str().unwrap_or("").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn begin_report_end_arrive_in_order_on_one_token() {
+        let Wired {
+            progress, client, ..
+        } = reporter().await;
+        let total = Some(200u64 << 20);
+        progress.start(Ecosystem::Npm, total);
+        progress.advance(Ecosystem::Npm, 100 << 20, total);
+        progress.done(Ecosystem::Npm, None);
+
+        assert!(
+            client
+                .wait_until(|r| r.iter().filter(|(m, _)| m == "$/progress").count() == 3)
+                .await
+        );
+        assert_eq!(kinds(&client), ["begin", "report", "end"]);
+
+        let created = client.params_of("window/workDoneProgress/create");
+        assert_eq!(created.len(), 1);
+        for p in client.params_of("$/progress") {
+            assert_eq!(p["token"], created[0]["token"]);
+        }
+        assert_eq!(client.params_of("$/progress")[1]["value"]["percentage"], 50);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_when_the_client_refuses_the_token() {
+        let Wired {
+            progress, client, ..
+        } = reporter().await;
+        client
+            .refuse_progress
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        progress.start(Ecosystem::Npm, Some(10));
+        progress.advance(Ecosystem::Npm, 5, Some(10));
+        progress.done(Ecosystem::Npm, None);
+
+        assert!(
+            client
+                .wait_until(|r| r.iter().any(|(m, _)| m == "window/workDoneProgress/create"))
+                .await
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            kinds(&client).is_empty(),
+            "sent {:?} after the token was refused",
+            kinds(&client)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_end_names_the_failure() {
+        let Wired {
+            progress, client, ..
+        } = reporter().await;
+        progress.start(Ecosystem::Npm, Some(10));
+        progress.done(Ecosystem::Npm, Some("connection reset"));
+
+        assert!(
+            client
+                .wait_until(|r| r.iter().filter(|(m, _)| m == "$/progress").count() == 2)
+                .await
+        );
+        assert_eq!(
+            client.params_of("$/progress")[1]["value"]["message"],
+            "npm failed: connection reset"
+        );
+    }
+
+    #[tokio::test]
+    async fn ecosystems_get_separate_tokens() {
+        let Wired {
+            progress, client, ..
+        } = reporter().await;
+        progress.start(Ecosystem::Npm, Some(10));
+        progress.start(Ecosystem::PyPI, Some(20));
+
+        assert!(
+            client
+                .wait_until(|r| r
+                    .iter()
+                    .filter(|(m, _)| m == "window/workDoneProgress/create")
+                    .count()
+                    == 2)
+                .await
+        );
+        let created = client.params_of("window/workDoneProgress/create");
+        assert_ne!(
+            created[0]["token"], created[1]["token"],
+            "npm and PyPI shared a token"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_percentage_when_the_size_is_unknown() {
+        // A mirror or proxy need not send Content-Length. An indeterminate bar
+        // beats a fabricated number.
+        let Wired {
+            progress, client, ..
+        } = reporter().await;
+        progress.start(Ecosystem::Npm, None);
+        progress.advance(Ecosystem::Npm, 5 << 20, None);
+
+        assert!(
+            client
+                .wait_until(|r| r.iter().filter(|(m, _)| m == "$/progress").count() == 2)
+                .await
+        );
+        let report = &client.params_of("$/progress")[1]["value"];
+        assert!(report.get("percentage").is_none(), "{report}");
+        assert_eq!(report["message"], "5.0 MB");
+    }
 }

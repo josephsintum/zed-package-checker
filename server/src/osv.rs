@@ -84,9 +84,10 @@ impl<'a> OsvAdvisory<'a> {
     /// Converts to the domain type, keeping only one ecosystem.
     ///
     /// Returns `None` for an advisory that is withdrawn — roughly 4% of a
-    /// typical archive — or that touches nothing in the wanted ecosystem.
+    /// typical archive — that has no id, or that touches nothing in the wanted
+    /// ecosystem.
     pub fn into_model(self, want: Ecosystem) -> Option<Advisory> {
-        if !self.withdrawn.is_empty() {
+        if !self.withdrawn.is_empty() || self.id.is_empty() {
             return None;
         }
 
@@ -281,5 +282,146 @@ mod tests {
         .expect("indexed");
         assert!(advisory.affected[0].ranges.is_empty());
         assert!(advisory.affected[0].versions.is_empty());
+    }
+
+    #[test]
+    fn a_withdrawn_advisory_is_not_indexed() {
+        // Withdrawn advisories are retracted, not fixed. About 4% of an
+        // archive, and reporting one is a pure false positive.
+        let advisory = decode(
+            r#"{"id":"GHSA-withdrawn","withdrawn":"2023-01-01T00:00:00Z",
+                "affected":[{"package":{"ecosystem":"npm","name":"lodash"}}]}"#,
+            Ecosystem::Npm,
+        );
+        assert!(advisory.is_none());
+    }
+
+    #[test]
+    fn an_advisory_without_an_id_is_not_indexed() {
+        // An id-less record would render a diagnostic with an empty code and a
+        // link to nothing.
+        let advisory = decode(
+            r#"{"affected":[{"package":{"ecosystem":"npm","name":"lodash"}}]}"#,
+            Ecosystem::Npm,
+        );
+        assert!(advisory.is_none());
+    }
+
+    #[test]
+    fn only_the_requested_ecosystem_is_kept() {
+        // One advisory routinely covers several ecosystems. Carrying the
+        // others would inflate every index with entries no lookup can reach.
+        const MULTI: &str = r#"{"id":"GHSA-multi","affected":[
+            {"package":{"ecosystem":"npm","name":"lodash"}},
+            {"package":{"ecosystem":"PyPI","name":"requests"}},
+            {"package":{"ecosystem":"Go","name":"example.com/x"}}]}"#;
+
+        let advisory = decode(MULTI, Ecosystem::Npm).expect("indexed");
+        assert_eq!(advisory.affected.len(), 1);
+        assert_eq!(&*advisory.affected[0].package.name, "lodash");
+
+        // And an advisory touching nothing in this ecosystem is dropped entirely.
+        assert!(decode(MULTI, Ecosystem::CratesIo).is_none());
+    }
+
+    #[test]
+    fn range_events_are_paired_along_the_timeline() {
+        // OSV ranges are event timelines, not intervals: a fix belongs to the
+        // introduction preceding it. Getting this wrong silently mis-matches
+        // versions, which is the worst kind of bug here.
+        type Range<'a> = (&'a str, &'a str, &'a str);
+        let cases: &[(&str, &str, &[Range<'_>])] = &[
+            (
+                "introduced and fixed",
+                r#"[{"introduced":"0"},{"fixed":"4.17.21"}]"#,
+                &[("0", "4.17.21", "")],
+            ),
+            (
+                "last_affected instead of fixed",
+                r#"[{"introduced":"0"},{"last_affected":"0.3.24"}]"#,
+                &[("0", "", "0.3.24")],
+            ),
+            (
+                "introduced with no fix is still affected",
+                r#"[{"introduced":"6.0.0"}]"#,
+                &[("6.0.0", "", "")],
+            ),
+            (
+                "backported fixes make disjoint ranges",
+                r#"[{"introduced":"0"},{"fixed":"1.2.3"},{"introduced":"2.0.0"},{"fixed":"2.0.5"}]"#,
+                &[("0", "1.2.3", ""), ("2.0.0", "2.0.5", "")],
+            ),
+            (
+                "an unclosed range after a closed one survives",
+                r#"[{"introduced":"0"},{"fixed":"1.2.3"},{"introduced":"2.0.0"}]"#,
+                &[("0", "1.2.3", ""), ("2.0.0", "", "")],
+            ),
+        ];
+        for (name, events, want) in cases {
+            let json = format!(
+                r#"{{"id":"GHSA-x","affected":[{{"package":{{"ecosystem":"npm","name":"p"}},
+                    "ranges":[{{"type":"SEMVER","events":{events}}}]}}]}}"#
+            );
+            let advisory = decode(&json, Ecosystem::Npm).expect("indexed");
+            let got: Vec<(&str, &str, &str)> = advisory.affected[0]
+                .ranges
+                .iter()
+                .map(|r| (&*r.introduced, &*r.fixed, &*r.last_affected))
+                .collect();
+            assert_eq!(got, *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn cvss_prefers_v3_and_tolerates_absence() {
+        const V3: &str = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";
+        const V4: &str = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N";
+        let cases: &[(&str, String, Option<f64>)] = &[
+            ("no severity is not an error", "[]".into(), None),
+            (
+                "cvss v3 is parsed",
+                format!(r#"[{{"type":"CVSS_V3","score":"{V3}"}}]"#),
+                Some(9.8),
+            ),
+            (
+                "cvss v4 is used when it is all there is",
+                format!(r#"[{{"type":"CVSS_V4","score":"{V4}"}}]"#),
+                Some(9.3),
+            ),
+            (
+                // Most tools display v3, so showing a different number than the
+                // advisory page for the same issue would invite mistrust.
+                "v3 is preferred when both are present",
+                format!(
+                    r#"[{{"type":"CVSS_V4","score":"{V4}"}},{{"type":"CVSS_V3","score":"{V3}"}}]"#
+                ),
+                Some(9.8),
+            ),
+            (
+                "a malformed vector is ignored rather than fatal",
+                r#"[{"type":"CVSS_V3","score":"not-a-vector"}]"#.into(),
+                None,
+            ),
+        ];
+        for (name, severity, want) in cases {
+            let json = format!(
+                r#"{{"id":"GHSA-x","severity":{severity},
+                    "affected":[{{"package":{{"ecosystem":"npm","name":"p"}}}}]}}"#
+            );
+            let advisory = decode(&json, Ecosystem::Npm).expect("indexed");
+            match want {
+                None => {
+                    assert_eq!(advisory.cvss_score, 0.0, "{name}");
+                    assert!(advisory.cvss_vector.is_empty(), "{name}");
+                }
+                Some(score) => {
+                    assert_eq!(advisory.cvss_score, *score, "{name}");
+                    assert!(
+                        !advisory.cvss_vector.is_empty(),
+                        "{name}: vector not retained"
+                    );
+                }
+            }
+        }
     }
 }

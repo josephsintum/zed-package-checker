@@ -1,11 +1,10 @@
 //! A counting allocator, so "how much does the index retain" can be answered
-//! the same way the Go harness answers it.
+//! from inside the process.
 //!
-//! Peak RSS comes from the kernel and is the honest cross-language number, but
-//! it conflates the index with transient parse garbage and with file pages. For
-//! a process that lives as long as the editor, what matters is what is still
-//! held after loading — which is `runtime.ReadMemStats` on the Go side and this
-//! on ours.
+//! Peak RSS comes from the kernel and is the honest number for comparing two
+//! processes, but it conflates the index with transient parse garbage and with
+//! file pages. For a process that lives as long as the editor, what matters is
+//! what is still held after loading, which is what this counts.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

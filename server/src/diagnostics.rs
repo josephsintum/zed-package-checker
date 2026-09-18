@@ -7,7 +7,6 @@
 use crate::model::{Finding, Fix, Severity};
 use crate::span::{Encoding, column};
 use std::path::Path;
-use std::sync::OnceLock;
 use tower_lsp_server::ls_types::{
     CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, Location,
     NumberOrString, Position, Range, Uri,
@@ -15,20 +14,6 @@ use tower_lsp_server::ls_types::{
 
 /// The `source` field on every diagnostic, and the server's name.
 pub const NAME: &str = "package-checker";
-
-/// Overrides [`NAME`], so two servers can run side by side and be told apart in
-/// the diagnostics panel. Set once from `--label`; unset in a normal build.
-static LABEL: OnceLock<String> = OnceLock::new();
-
-/// Names this server. [`NAME`] unless `--label` said otherwise.
-pub fn name() -> &'static str {
-    LABEL.get().map_or(NAME, String::as_str)
-}
-
-/// Sets the name this server reports. Ignored after the first call.
-pub fn set_label(label: String) {
-    let _ = LABEL.set(label);
-}
 
 /// One file's diagnostics: one per finding, plus a summary when there is more
 /// than one thing wrong.
@@ -82,7 +67,7 @@ fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
             .parse::<Uri>()
             .ok()
             .map(|href| CodeDescription { href }),
-        source: Some(name().to_owned()),
+        source: Some(NAME.to_owned()),
         message: message_for(finding, fixable),
         ..Default::default()
     };
@@ -110,8 +95,8 @@ fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
         "advisories": finding.advisories.iter().map(|a| a.id.to_string()).collect::<Vec<_>>(),
         "direct": finding.direct(),
     });
-    // Omitted rather than null when there is nothing to name, which is what the
-    // Go server does and what a consumer testing for the key expects.
+    // Omitted rather than null when there is nothing to name, which is what a
+    // consumer testing for the key expects.
     if let Fix::Clears(version) = &finding.fix
         && let Some(object) = data.as_object_mut()
     {
@@ -178,7 +163,7 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
         range: to_range(crate::model::Range::whole_line(line)),
         severity: Some(severity_level(worst, false, None)),
         code: Some(NumberOrString::String("summary".to_owned())),
-        source: Some(name().to_owned()),
+        source: Some(NAME.to_owned()),
         message,
         data: Some(serde_json::json!({ "summary": true, "path": path.to_string_lossy() })),
         ..Default::default()
@@ -602,5 +587,153 @@ mod tests {
             let message = message_for(&f, true);
             assert!(!message.contains("Press"), "{message}");
         }
+    }
+
+    #[test]
+    fn severity_follows_the_score_and_dev_demotes_one_step() {
+        let cases: &[(&str, f64, bool, DiagnosticSeverity)] = &[
+            (
+                "critical is an error",
+                9.8,
+                false,
+                DiagnosticSeverity::ERROR,
+            ),
+            ("high is an error", 7.5, false, DiagnosticSeverity::ERROR),
+            (
+                "medium is a warning",
+                5.0,
+                false,
+                DiagnosticSeverity::WARNING,
+            ),
+            ("low is a warning", 2.0, false, DiagnosticSeverity::WARNING),
+            (
+                "unscored is a warning",
+                0.0,
+                false,
+                DiagnosticSeverity::WARNING,
+            ),
+            // Development dependencies do not ship, so they are demoted
+            // rather than hidden.
+            (
+                "a dev dependency is demoted",
+                9.8,
+                true,
+                DiagnosticSeverity::WARNING,
+            ),
+            (
+                "a low dev dependency is demoted further",
+                2.0,
+                true,
+                DiagnosticSeverity::INFORMATION,
+            ),
+        ];
+        for (name, score, dev, want) in cases {
+            let f = Finding {
+                advisories: vec![advisory("GHSA-1", *score)],
+                dep_groups: if *dev {
+                    vec![DEV_GROUP.to_owned()]
+                } else {
+                    Vec::new()
+                },
+                ..finding()
+            };
+            assert_eq!(severity_for(&f), *want, "{name}");
+        }
+    }
+
+    fn with(name: &str, score: f64, line: u32) -> Finding {
+        Finding {
+            package: Package::new(Ecosystem::Npm, name, "1.0.0"),
+            advisories: vec![advisory("GHSA-1", score)],
+            evidence: Site::new("/p/package.json", crate::model::Range::whole_line(line)),
+            ..finding()
+        }
+    }
+
+    #[test]
+    fn a_summary_leads_when_more_than_one_thing_is_wrong() {
+        // Per-package diagnostics scatter; the summary is the one line that
+        // says the file has a problem.
+        let findings = [with("a", 9.8, 3), with("b", 7.5, 4), with("c", 5.0, 5)];
+        let diagnostics = for_file(Path::new("/p/package.json"), &findings, Encoding::Utf8);
+        assert_eq!(diagnostics.len(), 4, "three findings plus a summary");
+
+        let summary = &diagnostics[0];
+        assert_eq!(summary.code, Some(NumberOrString::String("summary".into())));
+        for want in [
+            "3 vulnerable dependencies",
+            "1 critical",
+            "1 high",
+            "1 medium",
+        ] {
+            assert!(
+                summary.message.contains(want),
+                "{:?} lacks {want}",
+                summary.message
+            );
+        }
+        // Nothing to read at that path, so the first line is the anchor.
+        assert_eq!(summary.range.start.line, 0);
+        assert_eq!(summary.data.as_ref().unwrap()["summary"], true);
+    }
+
+    #[test]
+    fn one_finding_is_its_own_summary() {
+        let diagnostics = for_file(
+            Path::new("/p/package.json"),
+            &[with("a", 9.8, 3)],
+            Encoding::Utf8,
+        );
+        assert_eq!(diagnostics.len(), 1);
+        assert_ne!(
+            diagnostics[0].code,
+            Some(NumberOrString::String("summary".into()))
+        );
+    }
+
+    #[test]
+    fn a_lockfile_resolved_finding_sits_on_the_manifest_line() {
+        // The diagnostic goes where the user can edit; related information
+        // says where the version was actually resolved.
+        let f = Finding {
+            declared: Some(Anchor::new(Site::new(
+                "/p/package.json",
+                crate::model::Range::whole_line(5),
+            ))),
+            ..lockfile_resolved()
+        };
+        let d = finding_diagnostic(&f, false);
+        assert_eq!(d.range.start.line, 4, "want the manifest line");
+        let related = d.related_information.expect("a link to the lockfile");
+        assert_eq!(related.len(), 1);
+        assert!(
+            related[0]
+                .location
+                .uri
+                .path()
+                .as_str()
+                .ends_with("/p/package-lock.json")
+        );
+    }
+
+    #[test]
+    fn finding_data_round_trips_what_a_code_action_needs() {
+        let fixed = Finding {
+            fix: Fix::Clears("9.9.9".into()),
+            ..finding()
+        };
+        let data = finding_diagnostic(&fixed, true).data.unwrap();
+        assert_eq!(data["ecosystem"], "npm");
+        assert_eq!(data["name"], "lodash");
+        assert_eq!(data["version"], "4.17.15");
+        assert_eq!(data["fixedVersion"], "9.9.9");
+        assert_eq!(data["direct"], true);
+        assert_eq!(data["advisories"], serde_json::json!(["GHSA-1"]));
+
+        let data = finding_diagnostic(&finding(), false).data.unwrap();
+        assert!(
+            data.get("fixedVersion").is_none(),
+            "omitted, not null: {data}"
+        );
     }
 }

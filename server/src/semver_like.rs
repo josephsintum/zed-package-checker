@@ -176,8 +176,8 @@ fn compare_identifier(a: &str, b: &str) -> Ordering {
     }
 }
 
-/// Splits an optionally-signed decimal integer, matching what Go's
-/// `big.Int.SetString(s, 10)` accepts — a leading `+` or `-` and then digits.
+/// Splits an optionally-signed decimal integer, matching what the reference
+/// comparator's integer parser accepts — a leading `+` or `-` and then digits.
 fn signed_digits(s: &str) -> Option<(bool, &str)> {
     let (negative, digits) = match s.as_bytes().first() {
         Some(b'-') => (true, &s[1..]),

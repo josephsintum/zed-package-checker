@@ -1,13 +1,12 @@
 //! Turning advisory archives on disk into an in-memory index.
 //!
-//! This is the workload the whole experiment is about. npm's archive holds
-//! 229,049 separately-compressed JSON documents totalling 379 MB uncompressed,
-//! 97% of them `MAL-` malicious-package reports rather than CVEs, and the Go
-//! server takes 3.5 s and retains 110 MB doing it.
+//! This is the heaviest work the server does. npm's archive holds 229,049
+//! separately-compressed JSON documents totalling 379 MB uncompressed, 97% of
+//! them `MAL-` malicious-package reports rather than CVEs.
 //!
-//! Two strategies are implemented, and both are measured, because a rewrite
-//! that wins only after being tuned harder than the original answers a
-//! different question than the one being asked.
+//! Two strategies are implemented and both are measured: the sequential one
+//! attributes the cost to inflating versus parsing, and the parallel one is what
+//! the server runs.
 
 use crate::index::Index;
 use crate::model::{Advisory, Ecosystem};
@@ -22,7 +21,7 @@ use std::time::Instant;
 /// How an archive's entries are decoded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Strategy {
-    /// One entry at a time, streamed from disk. The shape the Go loader has.
+    /// One entry at a time, streamed from disk.
     Sequential,
     /// Memory-mapped and decoded across every core. `ZipArchive` is `Clone`, so
     /// each worker gets its own cursor over the same mapping and no entry is
@@ -235,5 +234,130 @@ fn decode(bytes: &[u8], ecosystem: Ecosystem) -> Decoded {
             None => Decoded::Filtered,
         },
         Err(_) => Decoded::Failed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PackageKey;
+    use crate::testing::fake_archive;
+
+    const LODASH: &str = r#"{"id":"GHSA-1","summary":"bad thing","affected":[{
+        "package":{"ecosystem":"npm","name":"lodash"},
+        "ranges":[{"type":"SEMVER","events":[{"introduced":"0"},{"fixed":"4.17.21"}]}]}]}"#;
+    const EXPRESS: &str =
+        r#"{"id":"GHSA-2","affected":[{"package":{"ecosystem":"npm","name":"express"}}]}"#;
+    const WITHDRAWN: &str = r#"{"id":"GHSA-gone","withdrawn":"2023-01-01T00:00:00Z",
+        "affected":[{"package":{"ecosystem":"npm","name":"lodash"}}]}"#;
+
+    /// Downloads nothing: writes an archive straight to disk, so these tests
+    /// stay hermetic.
+    fn seeded(entries: &[(&str, &str)]) -> (tempfile::TempDir, Vec<(Ecosystem, PathBuf)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("all.zip");
+        std::fs::write(&path, fake_archive(entries)).unwrap();
+        (dir, vec![(Ecosystem::Npm, path)])
+    }
+
+    const BOTH: [Strategy; 2] = [Strategy::Sequential, Strategy::Parallel];
+
+    #[test]
+    fn an_archive_becomes_an_index() {
+        let (_dir, archives) = seeded(&[
+            ("GHSA-1.json", LODASH),
+            ("GHSA-2.json", EXPRESS),
+            ("GHSA-gone.json", WITHDRAWN),
+            ("not-json.txt", "ignored"),
+        ]);
+        for strategy in BOTH {
+            let (index, stats) = load(&archives, strategy).unwrap();
+            assert_eq!(
+                index.advisories(),
+                2,
+                "{strategy:?}: the withdrawn one is excluded"
+            );
+            assert_eq!(index.packages(), 2, "{strategy:?}");
+
+            let lodash: Vec<_> = index
+                .lookup(&PackageKey::new(Ecosystem::Npm, "lodash"))
+                .collect();
+            assert_eq!(lodash.len(), 1, "{strategy:?}");
+            assert_eq!(&*lodash[0].id, "GHSA-1");
+            assert_eq!(
+                index
+                    .lookup(&PackageKey::new(Ecosystem::Npm, "absent"))
+                    .count(),
+                0
+            );
+
+            assert!(index.covers(&[Ecosystem::Npm]));
+            assert!(
+                !index.covers(&[Ecosystem::Go]),
+                "claims to cover Go, never loaded"
+            );
+
+            let (_, s) = stats[0];
+            assert_eq!((s.entries, s.indexed, s.skipped), (3, 2, 0), "{strategy:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_archive_is_an_error_not_an_empty_index() {
+        // "Not downloaded yet" must never be indistinguishable from "nothing
+        // is vulnerable", which would be a silent false negative.
+        let dir = tempfile::tempdir().unwrap();
+        let archives = vec![(Ecosystem::Npm, dir.path().join("all.zip"))];
+        for strategy in BOTH {
+            assert!(matches!(
+                load(&archives, strategy),
+                Err(LoadError::Open { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_archive_nothing_decodes_from_is_rejected() {
+        // A zip that opens but whose entries are all garbage passes the zip
+        // validation the database does, so nothing upstream catches it.
+        // Loading it as a successful empty index would report every project
+        // clean.
+        let (_dir, archives) = seeded(&[
+            ("GHSA-1.json", "{ this is not json"),
+            ("GHSA-2.json", "]]]"),
+        ]);
+        for strategy in BOTH {
+            assert!(matches!(
+                load(&archives, strategy),
+                Err(LoadError::NotReady(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn one_unreadable_advisory_does_not_lose_the_rest() {
+        // The opposite of the above: some entries decode, so the archive is
+        // intact and the readable advisories are still worth having.
+        let (_dir, archives) =
+            seeded(&[("GHSA-broken.json", "{ not json"), ("GHSA-2.json", EXPRESS)]);
+        for strategy in BOTH {
+            let (index, stats) = load(&archives, strategy).unwrap();
+            assert_eq!(index.advisories(), 1, "{strategy:?}");
+            assert_eq!(
+                stats[0].1.skipped, 1,
+                "{strategy:?}: the skip must be counted"
+            );
+        }
+    }
+
+    #[test]
+    fn an_archive_of_only_withdrawn_advisories_is_an_empty_index() {
+        // An archive of nothing but withdrawn entries decodes cleanly and
+        // indexes nothing, and that is not corruption.
+        let (_dir, archives) = seeded(&[("GHSA-gone.json", WITHDRAWN)]);
+        for strategy in BOTH {
+            let (index, _) = load(&archives, strategy).unwrap();
+            assert_eq!(index.advisories(), 0, "{strategy:?}");
+        }
     }
 }

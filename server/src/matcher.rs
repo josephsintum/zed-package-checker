@@ -1,8 +1,7 @@
 //! Deciding which advisories apply to a project's dependencies.
 //!
 //! Only the range arithmetic is ours; version *ordering* lives in
-//! `crate::version`. osv-scanner's own matcher is not reused by either server:
-//! its database cache is filtered to the package names present when it first
+//! `crate::version`. osv-scanner's own matcher is not reused: its database cache is filtered to the package names present when it first
 //! loaded, and later calls receive that stale set regardless of what the project
 //! now depends on.
 
@@ -105,8 +104,8 @@ impl<'a> Matcher<'a> {
     fn applicable(&self, package: &Package) -> Vec<Arc<Advisory>> {
         let candidates = self.index.lookup(&package.key);
 
-        // Parsed once for the whole candidate set. The Go matcher re-parses the
-        // installed version inside every single bound comparison.
+        // Parsed once for the whole candidate set, not inside every bound
+        // comparison.
         let Ok(version) = Version::parse(&package.version, package.ecosystem()) else {
             return Vec::new();
         };
@@ -610,5 +609,58 @@ mod tests {
                 .findings(&[extracted("lodash", "4.17.21")])
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn findings_carry_evidence_and_declaration() {
+        // The manifest line is what the diagnostic anchors on, so it must
+        // survive matching rather than being rediscovered later.
+        let index = index_of(vec![advisory(
+            "GHSA-1",
+            5.0,
+            vec![npm("lodash", vec![range("0", "")], vec![])],
+        )]);
+        let declared = Site::new("/proj/package.json", Range::whole_line(5));
+        let evidence = Site::new("/proj/package-lock.json", Range::whole_line(14));
+        let extracted = ExtractedPackage {
+            evidence: evidence.clone(),
+            declared: Some(declared.clone()),
+            from_range: true,
+            dep_groups: vec![crate::model::DEV_GROUP.to_owned()],
+            ..extracted("lodash", "4.17.15")
+        };
+
+        let findings = Matcher::new(&index).findings(&[extracted]);
+        let f = &findings[0];
+        assert_eq!(f.evidence, evidence);
+        assert_eq!(
+            f.anchor_site(),
+            &declared,
+            "the manifest declaration is the anchor"
+        );
+        assert!(f.from_range, "from_range was lost");
+        assert!(f.dev(), "dependency groups were lost");
+    }
+
+    #[test]
+    fn an_unparsable_bound_skips_one_advisory_not_the_scan() {
+        // A bound the ecosystem's rules cannot read must not cost the user
+        // every other finding in the project.
+        let index = index_of(vec![
+            advisory(
+                "GHSA-bad",
+                5.0,
+                vec![npm("p", vec![range("0", "not a version")], vec![])],
+            ),
+            advisory(
+                "GHSA-good",
+                5.0,
+                vec![npm("q", vec![range("0", "")], vec![])],
+            ),
+        ]);
+        let findings =
+            Matcher::new(&index).findings(&[extracted("p", "1.0.0"), extracted("q", "1.0.0")]);
+        let names: Vec<&str> = findings.iter().map(|f| f.package.name()).collect();
+        assert_eq!(names, ["q"], "{findings:?}");
     }
 }

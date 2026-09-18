@@ -45,7 +45,7 @@ fn a_fourth_component_is_treated_as_a_prerelease() {
 
 #[test]
 fn arbitrary_precision_components() {
-    // Longer than u64. A big.Int in Go; a digit-string comparison here.
+    // Longer than u64: an arbitrary-precision component, compared as digits.
     assert_eq!(
         cmp(
             "1.0.99999999999999999999999999",

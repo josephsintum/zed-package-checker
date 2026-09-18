@@ -1,10 +1,9 @@
-# One crate, flat modules. The Go server splits this across nine packages
-# because Go's only mechanism for a dependency boundary is a package plus an
-# import test; Rust gets the same guarantee from module privacy, so the extra
-# crates would buy nothing but directories. See docs/RUST-VS-GO.md.
+# One crate, flat modules: module privacy gives every dependency boundary this
+# server needs, so extra crates would buy nothing but directories.
 [package]
 name = "package-checker"
-version = "0.0.1"
+version = "0.0.2"
+description = "A language server that flags vulnerable and malicious dependencies"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -44,11 +43,14 @@ ureq = "3"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+flate2 = "1"
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
 
-# One profile for everything the experiment measures, so a binary-size or
-# wall-time number never quietly compares different optimisation settings.
+# One profile for everything that is measured, so a binary-size or wall-time
+# number never quietly compares different optimisation settings.
 [profile.release]
 opt-level = 3
 lto = "thin"

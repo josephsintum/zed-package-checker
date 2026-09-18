@@ -142,6 +142,9 @@ func finding(name, version string, score float64, path string, line int) model.F
 			}},
 		}},
 		Evidence: model.Site{Path: path, Range: model.WholeLine(line)},
+		// Decided by the matcher in production; set here so the rendering
+		// tests exercise the same input the server would hand them.
+		Fix: model.Fix{Kind: model.FixClears, Version: "9.9.9"},
 	}
 }
 
@@ -580,25 +583,29 @@ func TestMessageFor(t *testing.T) {
 		absent   []string
 	}{
 		{
-			name: "the toolchain is not a dependency",
+			// The toolchain no longer suppresses its fix: a verified version
+			// clears all seventy-six rather than only the worst one's.
+			name: "the toolchain names a verified fix",
 			finding: model.Finding{
 				Package:    model.Package{PackageKey: stdlib, Version: "1.21"},
 				Advisories: advisories(stdlib, 76, 0, "1.21.1"),
+				Fix:        model.Fix{Kind: model.FixClears, Version: "1.25.13"},
 			},
 			contains: []string{
 				"Go toolchain 1.21",
 				"76 known vulnerabilities",
 				"go directive is a minimum",
+				"Fixed in 1.25.13",
 			},
-			// One advisory's fix clears almost none of seventy-six, and
 			// "Unknown" is what the Go database publishes for all of them.
-			absent: []string{"Fixed in", "Unknown", "stdlib", "advisories, worst"},
+			absent: []string{"Unknown", "stdlib", "advisories, worst"},
 		},
 		{
 			name: "a single toolchain advisory still names its fix",
 			finding: model.Finding{
 				Package:    model.Package{PackageKey: stdlib, Version: "1.21"},
 				Advisories: advisories(stdlib, 1, 0, "1.21.1"),
+				Fix:        model.Fix{Kind: model.FixClears, Version: "1.21.1"},
 			},
 			contains: []string{"Go toolchain 1.21", "1 known vulnerability", "Fixed in 1.21.1"},
 			absent:   []string{"Unknown"},
@@ -608,8 +615,9 @@ func TestMessageFor(t *testing.T) {
 			finding: model.Finding{
 				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
 				Advisories: advisories(lodash, 6, 7.2, "4.17.21"),
+				Fix:        model.Fix{Kind: model.FixClears, Version: "4.18.0"},
 			},
-			contains: []string{"npm:lodash@4.17.15", "6 advisories, worst High (CVSS 7.2)", "Fixed in 4.17.21"},
+			contains: []string{"npm:lodash@4.17.15", "6 advisories, worst High (CVSS 7.2)", "Fixed in 4.18.0"},
 			absent:   []string{"go directive"},
 		},
 		{
@@ -617,9 +625,40 @@ func TestMessageFor(t *testing.T) {
 			finding: model.Finding{
 				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
 				Advisories: advisories(lodash, 3, 0, "4.17.21"),
+				Fix:        model.Fix{Kind: model.FixClears, Version: "4.17.21"},
 			},
 			contains: []string{"3 known vulnerabilities", "Fixed in 4.17.21"},
 			absent:   []string{"Unknown"},
+		},
+		{
+			// "all of them" needs something to be plural about.
+			name: "one advisory with nothing that clears it",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
+				Advisories: advisories(lodash, 1, 7.2, "4.17.21"),
+				Fix:        model.Fix{Kind: model.FixPartial},
+			},
+			contains: []string{"No published version clears it"},
+			absent:   []string{"Fixed in", "all of them"},
+		},
+		{
+			name: "several advisories and no single version clearing them",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
+				Advisories: advisories(lodash, 3, 7.2, "4.17.21"),
+				Fix:        model.Fix{Kind: model.FixPartial},
+			},
+			contains: []string{"No single version clears all of them"},
+			absent:   []string{"Fixed in"},
+		},
+		{
+			name: "nothing published says nothing at all",
+			finding: model.Finding{
+				Package:    model.Package{PackageKey: lodash, Version: "4.17.15"},
+				Advisories: advisories(lodash, 2, 7.2, ""),
+				Fix:        model.Fix{Kind: model.FixNone},
+			},
+			absent: []string{"Fixed in", "clears"},
 		},
 	}
 

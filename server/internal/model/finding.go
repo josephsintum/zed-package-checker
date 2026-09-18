@@ -41,6 +41,37 @@ type Finding struct {
 	// DepGroups as reported by extraction: "dev", "optional", "peer". Empty
 	// means a production dependency.
 	DepGroups []string
+
+	// Fix is what to upgrade to, decided by the matcher where the index is
+	// available. Nothing downstream of it has one.
+	Fix Fix
+}
+
+// FixKind distinguishes the three answers to "what should I upgrade to".
+//
+// Three rather than a version-or-empty, because "nothing is published" and
+// "things are published but none of them is enough" are different answers and a
+// user acts differently on each.
+type FixKind int
+
+// Fix kinds.
+const (
+	// FixNone means no advisory on this package names a fixed version above
+	// the installed one.
+	FixNone FixKind = iota
+	// FixPartial means fixes are published, but no single one clears every
+	// advisory.
+	FixPartial
+	// FixClears means Version clears every advisory on the package.
+	FixClears
+)
+
+// Fix is what a user should upgrade to.
+type Fix struct {
+	Kind FixKind
+
+	// Version is set only when Kind is FixClears.
+	Version string
 }
 
 // Direct reports whether the project declares the package itself.

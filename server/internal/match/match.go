@@ -18,6 +18,8 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/google/osv-scalibr/semantic"
+
 	"github.com/josephsintum/zed-package-checker/server/internal/model"
 )
 
@@ -70,6 +72,7 @@ func (m *Matcher) Findings(ctx context.Context, pkgs []model.ExtractedPackage) (
 			Declared:   declaredAnchor(p),
 			FromRange:  p.FromRange,
 			DepGroups:  p.DepGroups,
+			Fix:        m.fixFor(p.Package, advisories),
 		})
 	}
 	return findings, nil
@@ -85,6 +88,84 @@ func declaredAnchor(p model.ExtractedPackage) *model.Anchor {
 		return nil
 	}
 	return &model.Anchor{Declaration: *p.Declared}
+}
+
+// affectedAt reports whether any advisory in the index still affects this
+// package at version.
+//
+// Shares affects with applicable, so a version this clears is one that would
+// produce no finding. An advisory whose bounds cannot be compared against the
+// candidate counts as affecting it: we cannot clear what we cannot evaluate,
+// and the safe direction here is the opposite of applicable's.
+func (m *Matcher) affectedAt(key model.PackageKey, version string) bool {
+	candidate, err := parseInstalled(model.Package{PackageKey: key, Version: version})
+	if err != nil {
+		// A version we cannot order is one we cannot recommend.
+		return true
+	}
+	for _, a := range m.index.Lookup(key) {
+		ok, err := candidate.affects(a)
+		if err != nil || ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fixFor returns the lowest published version above the installed one that no
+// advisory on this package still affects.
+//
+// Each candidate is checked against the whole index, not just the advisories
+// that produced this finding, because a fix for one can be affected by another.
+// "Above the installed one" keeps a fix backported to an older release line
+// from being offered as a downgrade.
+func (m *Matcher) fixFor(pkg model.Package, advisories []model.Advisory) model.Fix {
+	installed, err := parseInstalled(pkg)
+	if err != nil {
+		return model.Fix{Kind: model.FixNone}
+	}
+
+	type candidate struct {
+		raw    string
+		parsed semantic.Version
+	}
+	var candidates []candidate
+	for _, a := range advisories {
+		for _, fixed := range a.FixedVersionsFor(pkg.PackageKey) {
+			parsed, err := semantic.Parse(fixed, pkg.Ecosystem.String())
+			if err != nil {
+				continue
+			}
+			if cmp, err := installed.ver.Compare(parsed); err != nil || cmp >= 0 {
+				continue
+			}
+			candidates = append(candidates, candidate{raw: fixed, parsed: parsed})
+		}
+	}
+	if len(candidates) == 0 {
+		return model.Fix{Kind: model.FixNone}
+	}
+
+	// Ascending, so the first that clears is the lowest that does.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		cmp, err := candidates[i].parsed.Compare(candidates[j].parsed)
+		return err == nil && cmp < 0
+	})
+
+	for i, c := range candidates {
+		// Backported fixes repeat the same version across advisories, and a Go
+		// toolchain finding carries seventy-six of them; each duplicate is an
+		// entire pass over the package's posting list.
+		if i > 0 {
+			if cmp, err := candidates[i-1].parsed.Compare(c.parsed); err == nil && cmp == 0 {
+				continue
+			}
+		}
+		if !m.affectedAt(pkg.PackageKey, c.raw) {
+			return model.Fix{Kind: model.FixClears, Version: c.raw}
+		}
+	}
+	return model.Fix{Kind: model.FixPartial}
 }
 
 // applicable returns the advisories affecting a specific version, sorted with

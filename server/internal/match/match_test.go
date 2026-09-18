@@ -401,3 +401,130 @@ func TestEmptyInputs(t *testing.T) {
 		t.Errorf("got %d findings from no packages, want 0", len(findings))
 	}
 }
+
+// fixOf returns the Fix the matcher decides for one package against one index.
+func fixOf(t *testing.T, index mapIndex, p model.Package) model.Fix {
+	t.Helper()
+	m := New(discardLogger(), index)
+	findings, err := m.Findings(context.Background(), []model.ExtractedPackage{{
+		Package:  p,
+		Evidence: model.Site{Path: "/proj/package.json", Range: model.WholeLine(1)},
+	}})
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	if len(findings) == 0 {
+		return model.Fix{Kind: model.FixNone}
+	}
+	return findings[0].Fix
+}
+
+func TestFixIsTheLowestVersionClearingEveryAdvisory(t *testing.T) {
+	// Shaped on lodash@4.17.15: the worst advisory is fixed in 4.17.21, but
+	// another is still open until 4.18.0.
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "lodash"}
+	index := mapIndex{key: {
+		advisory("GHSA-worst", key, model.AffectedRange{Introduced: "0", Fixed: "4.17.21"}),
+		advisory("GHSA-later", key, model.AffectedRange{Introduced: "0", Fixed: "4.18.0"}),
+	}}
+
+	got := fixOf(t, index, pkg(model.EcosystemNPM, "lodash", "4.17.15"))
+	if got.Kind != model.FixClears || got.Version != "4.18.0" {
+		t.Errorf("Fix = %+v, want Clears 4.18.0", got)
+	}
+}
+
+func TestAFixAnotherAdvisoryStillAffectsIsRejected(t *testing.T) {
+	// The reason the verification step exists. A is fixed in 1.5.0, but B
+	// covers everything below 2.0.0 — so 1.5.0 is no fix at all.
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "evil"}
+	index := mapIndex{key: {
+		advisory("GHSA-a", key, model.AffectedRange{Introduced: "1.0.0", Fixed: "1.5.0"}),
+		advisory("GHSA-b", key, model.AffectedRange{Introduced: "0", Fixed: "2.0.0"}),
+	}}
+
+	got := fixOf(t, index, pkg(model.EcosystemNPM, "evil", "1.2.0"))
+	if got.Kind != model.FixClears || got.Version != "2.0.0" {
+		t.Errorf("Fix = %+v, want Clears 2.0.0 (1.5.0 is itself affected by GHSA-b)", got)
+	}
+}
+
+func TestABackportedFixIsNeverOfferedAsADowngrade(t *testing.T) {
+	// One advisory patched on two release lines at once. 1.2.3 is genuinely
+	// unaffected, and genuinely useless to a project on 2.0.0.
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "pkg"}
+	index := mapIndex{key: {
+		advisory("GHSA-1", key,
+			model.AffectedRange{Introduced: "1.0.0", Fixed: "1.2.3"},
+			model.AffectedRange{Introduced: "2.0.0", Fixed: "2.0.1"}),
+	}}
+
+	if got := fixOf(t, index, pkg(model.EcosystemNPM, "pkg", "2.0.0")); got.Version != "2.0.1" {
+		t.Errorf("Fix = %+v, want Clears 2.0.1, not a downgrade", got)
+	}
+	// The lower line still gets the lower fix, which is right for it.
+	if got := fixOf(t, index, pkg(model.EcosystemNPM, "pkg", "1.1.0")); got.Version != "1.2.3" {
+		t.Errorf("Fix = %+v, want Clears 1.2.3", got)
+	}
+}
+
+func TestDisjointReleaseLinesHaveNoSingleFix(t *testing.T) {
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "pkg"}
+	index := mapIndex{key: {
+		advisory("GHSA-fixed", key, model.AffectedRange{Introduced: "0", Fixed: "2.0.0"}),
+		advisory("GHSA-open", key, model.AffectedRange{Introduced: "1.0.0"}),
+	}}
+
+	if got := fixOf(t, index, pkg(model.EcosystemNPM, "pkg", "1.5.0")); got.Kind != model.FixPartial {
+		t.Errorf("Fix = %+v, want Partial", got)
+	}
+}
+
+func TestAnAdvisoryWithOnlyLastAffectedNamesNoFix(t *testing.T) {
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "pkg"}
+	index := mapIndex{key: {
+		advisory("GHSA-1", key, model.AffectedRange{Introduced: "0", LastAffected: "2.0.0"}),
+	}}
+
+	if got := fixOf(t, index, pkg(model.EcosystemNPM, "pkg", "1.0.0")); got.Kind != model.FixNone {
+		t.Errorf("Fix = %+v, want None", got)
+	}
+}
+
+func TestCandidatesAreOrderedByTheEcosystemNotTheArchive(t *testing.T) {
+	// Lexicographically "10.0.0" sorts below "9.0.0", so a string sort would
+	// answer 9.0.0 and leave the other advisory unresolved.
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "pkg"}
+	index := mapIndex{key: {
+		advisory("GHSA-a", key, model.AffectedRange{Introduced: "0", Fixed: "9.0.0"}),
+		advisory("GHSA-b", key, model.AffectedRange{Introduced: "0", Fixed: "10.0.0"}),
+	}}
+
+	got := fixOf(t, index, pkg(model.EcosystemNPM, "pkg", "1.0.0"))
+	if got.Version != "10.0.0" {
+		t.Errorf("Fix = %+v, want Clears 10.0.0", got)
+	}
+}
+
+func TestAffectedAtAgreesWithFindings(t *testing.T) {
+	// The two must share one definition of affected, or a verified fix means
+	// nothing.
+	key := model.PackageKey{Ecosystem: model.EcosystemNPM, Name: "pkg"}
+	index := mapIndex{key: {
+		advisory("GHSA-1", key, model.AffectedRange{Introduced: "1.0.0", Fixed: "2.0.0"}),
+	}}
+	m := New(discardLogger(), index)
+
+	for _, version := range []string{"0.9.0", "1.0.0", "1.9.9", "2.0.0", "3.0.0"} {
+		findings, err := m.Findings(context.Background(), []model.ExtractedPackage{{
+			Package:  pkg(model.EcosystemNPM, "pkg", version),
+			Evidence: model.Site{Path: "/proj/package.json", Range: model.WholeLine(1)},
+		}})
+		if err != nil {
+			t.Fatalf("Findings: %v", err)
+		}
+		if got, want := m.affectedAt(key, version), len(findings) > 0; got != want {
+			t.Errorf("affectedAt(%q) = %v, Findings says %v", version, got, want)
+		}
+	}
+}

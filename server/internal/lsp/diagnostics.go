@@ -44,7 +44,7 @@ func findingDiagnostic(f model.Finding) protocol.Diagnostic {
 	if href, err := uri.Parse(worst.URL()); err == nil {
 		d.CodeDescription = protocol.CodeDescription{Href: href}
 	}
-	if f.Evidence.Path != anchor.Path {
+	if resolvedElsewhere(f) {
 		// Point at where the version was actually resolved, since the
 		// diagnostic itself sits on the manifest line the user can edit.
 		d.RelatedInformation = []protocol.DiagnosticRelatedInformation{{
@@ -112,6 +112,17 @@ func summaryDiagnostic(path string, findings []model.Finding) (protocol.Diagnost
 	}, true
 }
 
+// resolvedElsewhere reports whether the version was resolved in a different file
+// from the one the diagnostic sits on — a lockfile pinning a manifest's range.
+//
+// Shared by the RelatedInformation link and the message clause. The link
+// additionally needs the evidence path to survive URI parsing, so it can be
+// absent where the sentence is present; the sentence is the one that must not
+// go missing, since it is the only part a client is obliged to show.
+func resolvedElsewhere(f model.Finding) bool {
+	return f.Evidence.Path != f.AnchorSite().Path
+}
+
 // messageFor renders the one-line description a diagnostic leads with.
 func messageFor(f model.Finding) string {
 	worst := f.Worst()
@@ -129,13 +140,20 @@ func messageFor(f model.Finding) string {
 
 	fmt.Fprintf(&b, " — %s", countAndSeverity(f, worst))
 
-	// One fixed version is the answer for one advisory. Across seventy-six it
-	// is merely the worst one's fix and clears almost none of the others, so
-	// naming it reads as a remedy when it is not one.
-	if !toolchain || len(f.Advisories) == 1 {
-		if fixed := worst.FixedVersionsFor(f.Package.PackageKey); len(fixed) > 0 {
-			fmt.Fprintf(&b, ". Fixed in %s", strings.Join(fixed, " or "))
+	// The version named here was checked back against the index, so it clears
+	// every advisory rather than only the worst one's. Where none does, saying
+	// so beats naming a version that does not finish the job.
+	switch f.Fix.Kind {
+	case model.FixClears:
+		fmt.Fprintf(&b, ". Fixed in %s", f.Fix.Version)
+	case model.FixPartial:
+		if len(f.Advisories) == 1 {
+			// "all of them" needs something to be plural about.
+			b.WriteString(". No published version clears it")
+		} else {
+			b.WriteString(". No single version clears all of them")
 		}
+	case model.FixNone:
 	}
 	if toolchain {
 		b.WriteString(". The go directive is a minimum, so the toolchain " +
@@ -143,6 +161,10 @@ func messageFor(f model.Finding) string {
 	}
 	if f.FromRange {
 		b.WriteString(". Version inferred from a range, so the installed one may differ")
+	}
+	if resolvedElsewhere(f) {
+		b.WriteString(". Version comes from the lockfile, so editing this file alone " +
+			"will not clear it")
 	}
 	if f.Dev() {
 		b.WriteString(". Development dependency")
@@ -237,8 +259,8 @@ func findingData(f model.Finding) protocol.LSPAny {
 		"advisories": ids,
 		"direct":     f.Direct(),
 	}
-	if fixed := f.Worst().FixedVersionsFor(f.Package.PackageKey); len(fixed) > 0 {
-		data["fixedVersion"] = fixed[0]
+	if f.Fix.Kind == model.FixClears {
+		data["fixedVersion"] = f.Fix.Version
 	}
 	return encodeData(data)
 }

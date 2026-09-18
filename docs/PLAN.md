@@ -677,6 +677,52 @@ re-reads without a restart — plus README with **CC-BY 4.0 attribution for OSV/
 | Monorepo scan cost | User-facing `exclude` and `maxScanSeconds` settings; skip list is config-driven from Stage 3 |
 | Python `toolchain` in the server key may spawn extra instances | Stage 13 |
 
+## Where the advisories come from, and why that changed
+
+*Added 2026-09-18.* The plan above assumes one source: download every advisory for
+every ecosystem a project uses, then match locally. That is still how `offline: true`
+works, and it is why the first run took about five seconds on a mixed repository while a
+competing extension answered in under one.
+
+The competitor is fast because it keeps no local database at all — it posts the
+dependency list to `api.osv.dev/v1/querybatch` on every session and persists nothing.
+That is a different trade, not a faster version of this one: it is useless offline and
+re-sends everything on each editor restart.
+
+What this server does now sits between the two. On a cold cache it asks osv.dev about
+the dependencies it actually found, **then keeps the answers on disk** and refreshes them
+on a twelve-hour TTL. First run is about a second; every run after it is local. The cache
+for a real project is a few hundred kilobytes rather than 253 MB.
+
+Three facts made it cheap, all verified rather than assumed:
+
+- The advisory bucket serves one JSON file per advisory (`/{ecosystem}/{id}.json`) in a
+  format **byte-identical to an archive entry**, so `osv.rs` decodes it unchanged.
+- An **unversioned** query returns a package's complete advisory set — for `lodash`, ten
+  rather than the six matching the installed version.
+- `Index::build` is pure and in-memory, so `Matcher` and everything downstream is
+  untouched; the two sources are indistinguishable to it.
+
+**The correctness trap, stated because it is subtle and silent.** Building the index from
+only the advisories that match the installed version omits exactly those whose window
+starts *above* it. `Matcher::fix_for` verifies a candidate upgrade by asking the index
+what else affects that package, so a filtered index would confidently recommend upgrading
+to a version already known to be vulnerable. The second, unversioned query is what
+prevents that; where even it comes back truncated, the package is marked partial and no
+fix is claimed at all.
+
+**The invariant:** for every package that produces a finding, the index holds that
+package's complete advisory set. `server_rs/scripts/compare-sources.py` is the gate —
+the same binary over the same fixtures, once against the archive and once against an
+empty cache, asserting every published diagnostic is identical.
+
+The privacy position changed with it, deliberately. Names, ecosystems and versions of
+dependencies are sent on a cold cache; manifests and source are not, ever. `online.exclude`
+keeps named packages off the wire, because an internal package name can say more than the
+dependency does and osv.dev has no advisories for private packages anyway. A one-time
+`window/showMessage` names what was sent, which is the consent step this class of tool
+usually omits.
+
 ## What a fifth ecosystem actually costs
 
 Measured against `server_rs/`, which has the same four ecosystems in one flat

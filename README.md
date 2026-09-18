@@ -4,8 +4,14 @@ A [Zed](https://zed.dev) extension that flags **vulnerable and malicious depende
 as editor diagnostics, across npm, Go modules and Python — the capability JetBrains
 IDEs get from their Package Checker plugin, which Zed has no equivalent for.
 
-Vulnerability data comes from [OSV.dev](https://osv.dev), matched **entirely on your
-machine**. Your dependency list never leaves the box.
+Vulnerability data comes from [OSV.dev](https://osv.dev). On a project's first scan the
+server asks osv.dev about the dependencies it found — **their names, ecosystems and
+versions, and nothing else**; not your manifest, not your code. Those answers are kept on
+disk, so every later scan is local and needs no network at all.
+
+That first request is what makes the first run take about a second instead of the minutes
+a 253 MB advisory download would. `"online": {"enabled": false}` turns it off and waits
+for the download instead; `"exclude"` keeps named packages off the wire either way.
 
 > **Status: early development.** It works, but there is no release to install yet —
 > you build it yourself. See [`docs/PLAN.md`](docs/PLAN.md) for the design and what
@@ -14,13 +20,26 @@ machine**. Your dependency list never leaves the box.
 ## How it works
 
 Zed extensions cannot publish diagnostics — only a language server can. So this is two
-pieces: a thin Rust→WASM shim that Zed loads, and a native Go language server that does
-the scanning.
+pieces: a thin Rust→WASM shim that Zed loads, and a native language server that does the
+scanning.
 
-The server uses [`osv-scalibr`](https://github.com/google/osv-scalibr) to find what a
-project depends on, and its own matcher against a local copy of the OSV database. The
-advisory archives are downloaded once, cached, and refreshed daily; after that, scanning
-touches the network not at all.
+There are two implementations of that server, and they agree diagnostic for diagnostic —
+`server_rs/scripts/compare-servers.py` drives both over stdio and diffs everything they
+publish. `server_rs/` (Rust) is where new work lands and is the one with the fast first
+run described below; `server/` (Go) is what releases currently ship, and stays as the
+independent implementation those comparisons are run against.
+
+The server finds what a project depends on by parsing its manifests and lockfiles, and
+matches them itself. There are two places the advisories can come from, and the matcher
+cannot tell them apart — `server_rs/scripts/compare-sources.py` exists to prove that:
+
+- **Per-package, over the network.** One batched request naming the dependencies, a
+  second for the few that matched, and the advisory records themselves from the same
+  public bucket the archives live in. Kept on disk and refreshed every twelve hours, so
+  it is one round trip on first run and none thereafter. A few hundred kilobytes.
+- **The whole archive.** Every advisory for every package in an ecosystem, 253 MB across
+  the four. Downloaded concurrently, smallest first, each published as it lands. This is
+  what `"offline": true` uses, and what the network path falls back to.
 
 Findings are anchored on the **manifest** line responsible rather than on a lockfile you
 never open, and the span covers the dependency's name rather than the whole line.
@@ -60,26 +79,66 @@ Lockfile-free projects still work: a constraint is resolved to its lowest satisf
 version and the finding is marked as inferred. A lockfile, where present, supersedes the
 range — including a workspace lockfile at the repository root governing a nested member.
 
-## Building
+## Configuration
 
-Requires Go and, for the extension half, a Rust toolchain with the `wasm32-wasip1`
-target (pinned in `rust-toolchain.toml`).
+Everything is optional; the defaults are what the server does with no configuration at
+all. Set it under `lsp.package-checker.initialization_options` in Zed's settings:
 
-```sh
-make server      # the language server
-make extension   # the Zed shim, to wasm
-make test        # go test -race ./...
-make lint        # go vet + golangci-lint
+```json
+{
+  "lsp": {
+    "package-checker": {
+      "initialization_options": {
+        "online": {
+          "enabled": true,
+          "exclude": ["@mycompany/", "Go:github.internal/"],
+          "ttlHours": 12
+        },
+        "offline": false
+      }
+    }
+  }
+}
 ```
 
-Point Zed at the binary with `lsp.package-checker.binary.path`, then install the
-extension as a dev extension.
+| Setting | Default | What it does |
+|---|---|---|
+| `online.enabled` | `true` | Ask osv.dev about this project's dependencies rather than waiting for the full archive. |
+| `online.exclude` | `[]` | Package names never to send, matched as a prefix against `ecosystem:name` or the bare name. Excluded packages are matched locally or not at all — never reported clean without being checked. |
+| `online.ttlHours` | `12` | How long a cached answer is trusted before being asked again. |
+| `offline` | `false` | Never touch the network at all: no queries, and no archive downloads either. |
 
-`scripts/lsp-smoke.py` drives the server over stdio without the editor, which is the
-quick way to see what it would publish:
+`online.exclude` is there because an internal package name can reveal more than the
+dependency does, and osv.dev has no advisories for private packages anyway.
+
+## Building
+
+Requires Go, a Rust toolchain, and the `wasm32-wasip1` target for the extension half
+(pinned in `rust-toolchain.toml`).
 
 ```sh
-python3 scripts/lsp-smoke.py --root path/to/project
+make server      # the Go server
+make server-rs   # the Rust server
+make extension   # the Zed shim, to wasm
+make test        # go test -race ./...
+make test-rs     # cargo test
+make lint        # go vet + golangci-lint
+make lint-rs     # cargo fmt --check + clippy -D warnings
+```
+
+Point Zed at whichever binary with `lsp.package-checker.binary.path`, then install the
+extension as a dev extension.
+
+`scripts/lsp-smoke.py` drives a server over stdio without the editor, which is the quick
+way to see what it would publish. `--db-root` at an empty directory exercises a cold
+first run, and `--options` sends settings:
+
+```sh
+python3 scripts/lsp-smoke.py \
+  --binary server_rs/target/release/package-checker-lsp \
+  --root path/to/project \
+  --db-root /tmp/empty \
+  --options '{"online":{"enabled":false}}'
 ```
 
 ## Design notes

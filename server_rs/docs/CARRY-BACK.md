@@ -195,6 +195,11 @@ Go is no longer a port target after this tier: new work lands in `server_rs/`,
 which becomes the shipping server. `server/` stays in CI as the reference
 implementation and the differential oracle.
 
+The first thing built on that footing is the per-package advisory cache — one
+batched osv.dev query on first run instead of a 253 MB download, persisted and
+refreshed on a TTL. It is Rust-only by decision, so `compare-servers.py` now
+covers the behaviour the two share rather than everything either does.
+
 ### 10. "Fixed in X" names a version that does not fix it
 
 `messageFor` (`internal/lsp/diagnostics.go:136`) reports the **worst advisory's**

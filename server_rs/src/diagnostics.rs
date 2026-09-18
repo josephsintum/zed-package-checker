@@ -66,7 +66,10 @@ fn finding_diagnostic(finding: &Finding) -> Diagnostic {
         // Point at where the version was actually resolved, since the
         // diagnostic itself sits on the manifest line the user can edit.
         diagnostic.related_information = Some(vec![DiagnosticRelatedInformation {
-            location: Location { uri, range: to_range(finding.evidence.range) },
+            location: Location {
+                uri,
+                range: to_range(finding.evidence.range),
+            },
             message: format!("{} resolved here", finding.package),
         }]);
     }
@@ -106,11 +109,16 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
         }
     }
 
-    let parts: Vec<String> = [Severity::Critical, Severity::High, Severity::Medium, Severity::Low]
-        .into_iter()
-        .filter(|s| counts[*s as usize] > 0)
-        .map(|s| format!("{} {}", counts[s as usize], s.as_str().to_lowercase()))
-        .collect();
+    let parts: Vec<String> = [
+        Severity::Critical,
+        Severity::High,
+        Severity::Medium,
+        Severity::Low,
+    ]
+    .into_iter()
+    .filter(|s| counts[*s as usize] > 0)
+    .map(|s| format!("{} {}", counts[s as usize], s.as_str().to_lowercase()))
+    .collect();
 
     let mut message = format!("{} vulnerable dependencies", findings.len());
     if !parts.is_empty() {
@@ -184,7 +192,10 @@ fn count_and_severity(finding: &Finding) -> String {
     match (n, rated) {
         (1, true) => describe(worst.severity(), worst.cvss_score),
         (1, false) => "1 known vulnerability".to_owned(),
-        (n, true) => format!("{n} advisories, worst {}", describe(worst.severity(), worst.cvss_score)),
+        (n, true) => format!(
+            "{n} advisories, worst {}",
+            describe(worst.severity(), worst.cvss_score)
+        ),
         (n, false) => format!("{n} known vulnerabilities"),
     }
 }

@@ -79,7 +79,12 @@ impl<'a> SemverLike<'a> {
             Cow::Borrowed(tail)
         };
 
-        SemverLike { src, components, count: kept as u8, build }
+        SemverLike {
+            src,
+            components,
+            count: kept as u8,
+            build,
+        }
     }
 
     /// The nth numeric component, as its digits. Absent components read as `"0"`.

@@ -47,7 +47,11 @@ fn a_fourth_component_is_treated_as_a_prerelease() {
 fn arbitrary_precision_components() {
     // Longer than u64. A big.Int in Go; a digit-string comparison here.
     assert_eq!(
-        cmp("1.0.99999999999999999999999999", "1.0.99999999999999999999999998", Npm),
+        cmp(
+            "1.0.99999999999999999999999999",
+            "1.0.99999999999999999999999998",
+            Npm
+        ),
         Greater
     );
 }
@@ -71,12 +75,22 @@ fn pypi_pep440() {
 fn pypi_legacy_versions_are_accepted_and_sort_lowest() {
     // Real strings from the PyPI advisory archive. A strict PEP 440 parser
     // rejects every one of these, which would silently drop the advisory.
-    for legacy in ["0.3m1", "0.1-charmander", "0.1.0.dev-120828c", "0.12.10-NA", "0.3.2d"] {
+    for legacy in [
+        "0.3m1",
+        "0.1-charmander",
+        "0.1.0.dev-120828c",
+        "0.12.10-NA",
+        "0.3.2d",
+    ] {
         assert!(
             Version::parse(legacy, PyPI).is_ok(),
             "{legacy:?} must parse"
         );
-        assert_eq!(cmp(legacy, "1.0", PyPI), Less, "{legacy:?} vs a PEP 440 version");
+        assert_eq!(
+            cmp(legacy, "1.0", PyPI),
+            Less,
+            "{legacy:?} vs a PEP 440 version"
+        );
     }
     assert_eq!(cmp("0.3m1", "0.3m2", PyPI), Less);
 }

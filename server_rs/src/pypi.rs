@@ -109,7 +109,10 @@ impl PyPiVersion {
     }
 
     fn compare_pre(&self, other: &PyPiVersion) -> Ordering {
-        match (self.should_apply_pre_trick(), other.should_apply_pre_trick()) {
+        match (
+            self.should_apply_pre_trick(),
+            other.should_apply_pre_trick(),
+        ) {
             (true, true) => return Ordering::Equal,
             (true, false) => return Ordering::Less,
             (false, true) => return Ordering::Greater,

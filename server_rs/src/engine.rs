@@ -403,9 +403,16 @@ mod tests {
         engine.request(Reason::Startup);
         settle().await;
 
-        let found = engine.findings(PathBuf::from("/project/package.json")).await;
+        let found = engine
+            .findings(PathBuf::from("/project/package.json"))
+            .await;
         assert_eq!(found.len(), 1);
-        assert!(engine.findings(PathBuf::from("/project/go.mod")).await.is_empty());
+        assert!(
+            engine
+                .findings(PathBuf::from("/project/go.mod"))
+                .await
+                .is_empty()
+        );
         // A query must never trigger work.
         assert_eq!(scanner.calls.load(Ordering::SeqCst), 1);
         engine.shutdown().await;

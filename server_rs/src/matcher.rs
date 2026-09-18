@@ -96,13 +96,19 @@ fn affects(advisory: &Advisory, package: &Package, version: &Version<'_>) -> boo
 fn in_range(range: &crate::model::AffectedRange, version: &Version<'_>) -> bool {
     if !range.introduced.is_empty()
         && &*range.introduced != INTRODUCED_FROM_THE_BEGINNING
-        && matches!(version.compare_str(&range.introduced), Ok(std::cmp::Ordering::Less))
+        && matches!(
+            version.compare_str(&range.introduced),
+            Ok(std::cmp::Ordering::Less)
+        )
     {
         return false;
     }
 
     if !range.fixed.is_empty() {
-        return matches!(version.compare_str(&range.fixed), Ok(std::cmp::Ordering::Less));
+        return matches!(
+            version.compare_str(&range.fixed),
+            Ok(std::cmp::Ordering::Less)
+        );
     }
     if !range.last_affected.is_empty() {
         // `last_affected` names the final bad version rather than the first good
@@ -274,10 +280,26 @@ mod tests {
     #[test]
     fn advisories_are_sorted_by_severity_then_id() {
         let index = index_of(vec![
-            advisory("GHSA-low", 2.0, vec![npm("lodash", vec![range("0", "")], vec![])]),
-            advisory("GHSA-crit", 9.5, vec![npm("lodash", vec![range("0", "")], vec![])]),
-            advisory("GHSA-b-high", 7.5, vec![npm("lodash", vec![range("0", "")], vec![])]),
-            advisory("GHSA-a-high", 7.5, vec![npm("lodash", vec![range("0", "")], vec![])]),
+            advisory(
+                "GHSA-low",
+                2.0,
+                vec![npm("lodash", vec![range("0", "")], vec![])],
+            ),
+            advisory(
+                "GHSA-crit",
+                9.5,
+                vec![npm("lodash", vec![range("0", "")], vec![])],
+            ),
+            advisory(
+                "GHSA-b-high",
+                7.5,
+                vec![npm("lodash", vec![range("0", "")], vec![])],
+            ),
+            advisory(
+                "GHSA-a-high",
+                7.5,
+                vec![npm("lodash", vec![range("0", "")], vec![])],
+            ),
         ]);
         assert_eq!(
             matches(&index, "lodash", "1.0.0"),
@@ -288,8 +310,16 @@ mod tests {
     #[test]
     fn a_malicious_advisory_outranks_a_scored_one() {
         let index = index_of(vec![
-            advisory("GHSA-crit", 9.8, vec![npm("evil", vec![range("0", "")], vec![])]),
-            advisory("MAL-2024-1", 0.0, vec![npm("evil", vec![range("0", "")], vec![])]),
+            advisory(
+                "GHSA-crit",
+                9.8,
+                vec![npm("evil", vec![range("0", "")], vec![])],
+            ),
+            advisory(
+                "MAL-2024-1",
+                0.0,
+                vec![npm("evil", vec![range("0", "")], vec![])],
+            ),
         ]);
         let findings = Matcher::new(&index).findings(&[extracted("evil", "1.0.0")]);
         assert_eq!(findings.len(), 1);
@@ -316,6 +346,10 @@ mod tests {
             5.0,
             vec![npm("lodash", vec![range("4.0.0", "4.17.21")], vec![])],
         )]);
-        assert!(Matcher::new(&index).findings(&[extracted("lodash", "4.17.21")]).is_empty());
+        assert!(
+            Matcher::new(&index)
+                .findings(&[extracted("lodash", "4.17.21")])
+                .is_empty()
+        );
     }
 }

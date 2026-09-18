@@ -77,10 +77,11 @@ impl Publisher for ClientPublisher {
         // Rendering reads the manifest from disk, so it happens off the runtime.
         let client = self.client.clone();
         tokio::spawn(async move {
-            let rendered =
-                tokio::task::spawn_blocking(move || diagnostics::for_file(&path, &findings, encoding))
-                    .await
-                    .unwrap_or_default();
+            let rendered = tokio::task::spawn_blocking(move || {
+                diagnostics::for_file(&path, &findings, encoding)
+            })
+            .await
+            .unwrap_or_default();
             client.publish_diagnostics(uri, rendered, None).await;
         });
     }
@@ -150,7 +151,8 @@ impl LanguageServer for Backend {
             .filter(|encodings| encodings.contains(&PositionEncodingKind::UTF8))
             .map(|_| PositionEncodingKind::UTF8)
             .unwrap_or(PositionEncodingKind::UTF16);
-        self.utf16.store(encoding == PositionEncodingKind::UTF16, Ordering::Relaxed);
+        self.utf16
+            .store(encoding == PositionEncodingKind::UTF16, Ordering::Relaxed);
 
         let (requester, pending) = Engine::pending();
         let scanner = (self.build)(&root, requester);
@@ -227,7 +229,9 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let Some(path) = uri_to_path(&params.text_document.uri) else { return };
+        let Some(path) = uri_to_path(&params.text_document.uri) else {
+            return;
+        };
         if is_manifest(&path)
             && let Some(engine) = self.engine()
         {
@@ -239,7 +243,9 @@ impl LanguageServer for Backend {
         // Re-publish what is already known, and never scan. Zed shows
         // diagnostics for files that were never opened, so this is insurance
         // rather than the mechanism.
-        let Some(path) = uri_to_path(&params.text_document.uri) else { return };
+        let Some(path) = uri_to_path(&params.text_document.uri) else {
+            return;
+        };
         let Some(engine) = self.engine() else { return };
         let findings = engine.findings(path.clone()).await;
         if findings.is_empty() {
@@ -317,7 +323,9 @@ mod tests {
 
     #[test]
     fn uris_become_paths() {
-        let uri: Uri = "file:///Users/me/my%20project/package.json".parse().unwrap();
+        let uri: Uri = "file:///Users/me/my%20project/package.json"
+            .parse()
+            .unwrap();
         assert_eq!(
             uri_to_path(&uri).unwrap(),
             PathBuf::from("/Users/me/my project/package.json")

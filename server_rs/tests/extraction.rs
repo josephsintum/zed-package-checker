@@ -116,7 +116,9 @@ fn a_crate_is_not_a_dependency_of_itself() {
     // Cargo.lock lists every [[package]] including the local crate, and nothing
     // in the entry says which one is local; the name comes from Cargo.toml.
     assert!(
-        !extract("rust-cargo").iter().any(|p| p.contains("rust-cargo-fixture")),
+        !extract("rust-cargo")
+            .iter()
+            .any(|p| p.contains("rust-cargo-fixture")),
         "the project's own crate must not be reported"
     );
 }

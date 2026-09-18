@@ -113,7 +113,10 @@ pub struct PackageKey {
 
 impl PackageKey {
     pub fn new(ecosystem: Ecosystem, name: impl Into<Box<str>>) -> Self {
-        PackageKey { ecosystem, name: name.into() }
+        PackageKey {
+            ecosystem,
+            name: name.into(),
+        }
     }
 
     pub fn is_go_toolchain(&self) -> bool {
@@ -178,7 +181,10 @@ impl Position {
 
     /// Converts the one-based line numbers manifests and parsers report.
     pub const fn from_one_based_line(line: u32) -> Self {
-        Position { line: line.saturating_sub(1), column: 0 }
+        Position {
+            line: line.saturating_sub(1),
+            column: 0,
+        }
     }
 }
 
@@ -221,7 +227,10 @@ pub struct Site {
 
 impl Site {
     pub fn new(path: impl Into<PathBuf>, range: Range) -> Self {
-        Site { path: path.into(), range }
+        Site {
+            path: path.into(),
+            range,
+        }
     }
 }
 
@@ -238,7 +247,10 @@ pub struct Anchor {
 
 impl Anchor {
     pub fn new(declaration: Site) -> Self {
-        Anchor { declaration, version: None }
+        Anchor {
+            declaration,
+            version: None,
+        }
     }
 
     pub fn with_version(mut self, version: Site) -> Self {
@@ -469,7 +481,13 @@ impl Finding {
         self.advisories
             .iter()
             .map(Arc::as_ref)
-            .reduce(|best, a| if a.severity() > best.severity() { a } else { best })
+            .reduce(|best, a| {
+                if a.severity() > best.severity() {
+                    a
+                } else {
+                    best
+                }
+            })
             .expect("a finding always carries at least one advisory")
     }
 

@@ -101,8 +101,7 @@ impl Index {
     /// advisories themselves.
     pub fn overhead_bytes(&self) -> usize {
         let postings = self.postings.capacity() * size_of::<u32>();
-        let map = self.by_package.capacity()
-            * (size_of::<PackageKey>() + size_of::<(u32, u32)>());
+        let map = self.by_package.capacity() * (size_of::<PackageKey>() + size_of::<(u32, u32)>());
         let names: usize = self.by_package.keys().map(|k| k.name.len()).sum();
         postings + map + names
     }

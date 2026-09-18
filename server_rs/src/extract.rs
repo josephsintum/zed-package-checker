@@ -18,7 +18,15 @@ use std::path::{Path, PathBuf};
 /// In code rather than in user-visible defaults: a manifest under
 /// `node_modules` describes someone else's package, which is a correctness
 /// property and not a preference.
-const SKIP_DIRS: &[&str] = &["node_modules", ".git", ".venv", "venv", "vendor", "target", "dist"];
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    ".git",
+    ".venv",
+    "venv",
+    "vendor",
+    "target",
+    "dist",
+];
 
 /// Stops a pathological tree from being walked forever.
 const DEFAULT_MAX_FILES: usize = 100_000;
@@ -26,7 +34,10 @@ const DEFAULT_MAX_FILES: usize = 100_000;
 #[derive(Debug, thiserror::Error)]
 pub enum ExtractError {
     #[error("walk {root}: {source}")]
-    Walk { root: PathBuf, source: ignore::Error },
+    Walk {
+        root: PathBuf,
+        source: ignore::Error,
+    },
 }
 
 pub struct Extractor {
@@ -38,7 +49,10 @@ pub struct Extractor {
 
 impl Default for Extractor {
     fn default() -> Self {
-        Extractor { exclude: Vec::new(), max_files: DEFAULT_MAX_FILES }
+        Extractor {
+            exclude: Vec::new(),
+            max_files: DEFAULT_MAX_FILES,
+        }
     }
 }
 
@@ -87,7 +101,10 @@ impl Extractor {
             .build();
 
         for entry in walker {
-            let entry = entry.map_err(|source| ExtractError::Walk { root: root.into(), source })?;
+            let entry = entry.map_err(|source| ExtractError::Walk {
+                root: root.into(),
+                source,
+            })?;
             if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
@@ -96,7 +113,9 @@ impl Extractor {
                 break;
             }
             let path = entry.path();
-            let Some(parse) = parser_for(path) else { continue };
+            let Some(parse) = parser_for(path) else {
+                continue;
+            };
             let Ok(source) = std::fs::read_to_string(path) else {
                 // A manifest we cannot read is not a scan failure: it may be
                 // binary, or being written right now.
@@ -141,7 +160,9 @@ fn is_own_crate(sighting: &ExtractedPackage, cargo_self: &HashMap<PathBuf, Strin
         return false;
     }
     let dir = sighting.evidence.path.parent().unwrap_or(Path::new(""));
-    cargo_self.get(dir).is_some_and(|own| *own == *sighting.package.name())
+    cargo_self
+        .get(dir)
+        .is_some_and(|own| *own == *sighting.package.name())
 }
 
 /// A package within one project directory.
@@ -180,7 +201,9 @@ fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
     for sighting in &sightings {
         let scope = scope_of(sighting);
         if sighting.from_range {
-            declared.entry(scope).or_insert_with(|| sighting.evidence.clone());
+            declared
+                .entry(scope)
+                .or_insert_with(|| sighting.evidence.clone());
         } else {
             locked.insert(scope);
         }
@@ -230,7 +253,10 @@ fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
 fn locked_at_or_above(locked: &std::collections::HashSet<Scope>, scope: &Scope) -> bool {
     let mut dir = scope.dir.as_path();
     loop {
-        if locked.contains(&Scope { dir: dir.to_path_buf(), package: scope.package.clone() }) {
+        if locked.contains(&Scope {
+            dir: dir.to_path_buf(),
+            package: scope.package.clone(),
+        }) {
             return true;
         }
         match dir.parent() {

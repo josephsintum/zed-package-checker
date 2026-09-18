@@ -36,9 +36,15 @@ pub enum LoadError {
     #[error("advisory database not ready: {0}")]
     NotReady(String),
     #[error("open {path}: {source}")]
-    Open { path: PathBuf, source: std::io::Error },
+    Open {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("read {path}: {source}")]
-    Zip { path: PathBuf, source: zip::result::ZipError },
+    Zip {
+        path: PathBuf,
+        source: zip::result::ZipError,
+    },
 }
 
 /// What one archive contributed, for logging and for the benchmarks.
@@ -99,9 +105,15 @@ fn load_sequential(
     path: &Path,
     ecosystem: Ecosystem,
 ) -> Result<(Vec<Advisory>, ArchiveStats), LoadError> {
-    let file = File::open(path).map_err(|source| LoadError::Open { path: path.into(), source })?;
-    let mut archive = zip::ZipArchive::new(BufReader::new(file))
-        .map_err(|source| LoadError::Zip { path: path.into(), source })?;
+    let file = File::open(path).map_err(|source| LoadError::Open {
+        path: path.into(),
+        source,
+    })?;
+    let mut archive =
+        zip::ZipArchive::new(BufReader::new(file)).map_err(|source| LoadError::Zip {
+            path: path.into(),
+            source,
+        })?;
 
     let mut out = Vec::new();
     let mut stats = ArchiveStats::default();
@@ -143,16 +155,24 @@ fn load_parallel(
     path: &Path,
     ecosystem: Ecosystem,
 ) -> Result<(Vec<Advisory>, ArchiveStats), LoadError> {
-    let file = File::open(path).map_err(|source| LoadError::Open { path: path.into(), source })?;
+    let file = File::open(path).map_err(|source| LoadError::Open {
+        path: path.into(),
+        source,
+    })?;
     // Safety: the archive is published by an atomic rename and never written in
     // place, so the mapping cannot be truncated underneath us. A concurrent
     // refresh creates a new file and renames over the name, leaving this
     // mapping pointing at the old inode.
-    let mmap = unsafe { Mmap::map(&file) }
-        .map_err(|source| LoadError::Open { path: path.into(), source })?;
+    let mmap = unsafe { Mmap::map(&file) }.map_err(|source| LoadError::Open {
+        path: path.into(),
+        source,
+    })?;
 
-    let archive = zip::ZipArchive::new(Cursor::new(&mmap[..]))
-        .map_err(|source| LoadError::Zip { path: path.into(), source })?;
+    let archive =
+        zip::ZipArchive::new(Cursor::new(&mmap[..])).map_err(|source| LoadError::Zip {
+            path: path.into(),
+            source,
+        })?;
 
     let names: Vec<usize> = (0..archive.len()).collect();
     let results: Vec<(Option<Advisory>, ArchiveStats)> = names

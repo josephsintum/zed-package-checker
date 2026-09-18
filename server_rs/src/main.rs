@@ -19,7 +19,11 @@ struct Options {
 }
 
 fn parse_args() -> Result<Options, String> {
-    let mut options = Options { log_file: None, debug: false, db_root: None };
+    let mut options = Options {
+        log_file: None,
+        debug: false,
+        db_root: None,
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -53,11 +57,14 @@ async fn main() {
     let subscriber = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| level.into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| level.into()),
         );
     match options.log_file.as_ref().and_then(|path| {
-        std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()
     }) {
         Some(file) => subscriber.with_writer(std::sync::Mutex::new(file)).init(),
         None => subscriber.init(),
@@ -71,14 +78,18 @@ async fn main() {
 
     let (service, socket) = LspService::new(move |client| {
         let database = Arc::clone(&database);
-        Backend::new(client, VERSION.to_owned(), move |_root, requester: Requester| {
-            let database = Arc::clone(&database);
-            let scanner = WorkspaceScanner::new(Extractor::new(), database, move || {
-                // The archives just landed; the scan that was refused can run.
-                requester.request(package_checker::Reason::DatabaseSync);
-            });
-            Arc::new(scanner) as Arc<dyn Scanner>
-        })
+        Backend::new(
+            client,
+            VERSION.to_owned(),
+            move |_root, requester: Requester| {
+                let database = Arc::clone(&database);
+                let scanner = WorkspaceScanner::new(Extractor::new(), database, move || {
+                    // The archives just landed; the scan that was refused can run.
+                    requester.request(package_checker::Reason::DatabaseSync);
+                });
+                Arc::new(scanner) as Arc<dyn Scanner>
+            },
+        )
     });
 
     Server::new(tokio::io::stdin(), tokio::io::stdout(), socket)

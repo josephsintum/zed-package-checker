@@ -29,7 +29,10 @@ impl LineIndex {
         let offset = offset as u32;
         // partition_point is the binary search; the line is the last start at or
         // before the offset.
-        let line = self.starts.partition_point(|&s| s <= offset).saturating_sub(1);
+        let line = self
+            .starts
+            .partition_point(|&s| s <= offset)
+            .saturating_sub(1);
         (line as u32, self.starts[line])
     }
 

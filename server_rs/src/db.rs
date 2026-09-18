@@ -117,7 +117,8 @@ impl Database {
     /// each server invalidating the other's record of when it last checked, and
     /// both re-downloading. Separate sidecars, one shared archive.
     fn meta_path(&self, ecosystem: Ecosystem) -> PathBuf {
-        self.dir_for(ecosystem).join(format!("{ARCHIVE_NAME}.rsmeta"))
+        self.dir_for(ecosystem)
+            .join(format!("{ARCHIVE_NAME}.rsmeta"))
     }
 
     fn lock_path(&self, ecosystem: Ecosystem) -> PathBuf {
@@ -134,7 +135,10 @@ impl Database {
 
     /// The archives for the named ecosystems, ready to be handed to `load`.
     pub fn archives(&self, ecosystems: &[Ecosystem]) -> Vec<(Ecosystem, PathBuf)> {
-        ecosystems.iter().map(|&e| (e, self.archive_path(e))).collect()
+        ecosystems
+            .iter()
+            .map(|&e| (e, self.archive_path(e)))
+            .collect()
     }
 
     /// Downloads or revalidates every named ecosystem.
@@ -165,8 +169,8 @@ impl Database {
         }
 
         let lock_path = self.lock_path(ecosystem);
-        let lock = File::create(&lock_path)
-            .map_err(io_err(format!("open {}", lock_path.display())))?;
+        let lock =
+            File::create(&lock_path).map_err(io_err(format!("open {}", lock_path.display())))?;
 
         // std gained advisory file locking in 1.89, so the `gofrs/flock`
         // equivalent the Go server needs is simply not a dependency here.
@@ -317,7 +321,10 @@ impl Database {
         );
 
         if let Some(progress) = &self.progress {
-            progress.done(ecosystem, result.as_ref().err().map(|e| e.to_string()).as_deref());
+            progress.done(
+                ecosystem,
+                result.as_ref().err().map(|e| e.to_string()).as_deref(),
+            );
         }
         result?;
 
@@ -350,7 +357,9 @@ impl Database {
             .by_name(&format!("{advisory_id}.json"))
             .map_err(|e| DbError::NotReady(format!("{advisory_id} in {ecosystem}: {e}")))?;
         let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes).map_err(io_err("read advisory"))?;
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(io_err("read advisory"))?;
 
         #[derive(Deserialize)]
         struct Details {
@@ -473,7 +482,10 @@ fn validate_zip(path: &Path) -> Result<(), DbError> {
     let archive = zip::ZipArchive::new(io::BufReader::new(file))
         .map_err(|e| DbError::NotReady(format!("{}: not a readable zip: {e}", path.display())))?;
     if archive.is_empty() {
-        return Err(DbError::NotReady(format!("{}: zip archive is empty", path.display())));
+        return Err(DbError::NotReady(format!(
+            "{}: zip archive is empty",
+            path.display()
+        )));
     }
     Ok(())
 }
@@ -503,7 +515,8 @@ fn write_atomic(
         write(&mut file).map_err(io_err(format!("write {}", tmp.display())))?;
         // Flush before publishing: a rename can otherwise be visible after a
         // crash while the contents are not.
-        file.sync_all().map_err(io_err(format!("sync {}", tmp.display())))?;
+        file.sync_all()
+            .map_err(io_err(format!("sync {}", tmp.display())))?;
         drop(file);
         verify(&tmp)?;
         rename_with_retry(&tmp, path)
@@ -527,7 +540,12 @@ fn rename_with_retry(from: &Path, to: &Path) -> Result<(), DbError> {
                 std::thread::sleep(delay);
                 delay *= 2;
             }
-            Err(e) => return Err(DbError::Io { context: format!("rename to {}", to.display()), source: e }),
+            Err(e) => {
+                return Err(DbError::Io {
+                    context: format!("rename to {}", to.display()),
+                    source: e,
+                });
+            }
         }
     }
     unreachable!("the loop returns on the final attempt")

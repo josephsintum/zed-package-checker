@@ -14,8 +14,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 fn corpus() -> Option<String> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/corpus/ordering.tsv");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/ordering.tsv");
     std::fs::read_to_string(path).ok()
 }
 
@@ -65,7 +64,9 @@ fn agrees_with_scalibr_over_the_real_archives() {
         if got != want {
             let entry = diverged.entry(eco).or_default();
             if entry.len() < 10 {
-                entry.push(format!("{a:?} vs {b:?}: got {got:?}, scalibr said {want:?}"));
+                entry.push(format!(
+                    "{a:?} vs {b:?}: got {got:?}, scalibr said {want:?}"
+                ));
             } else {
                 entry.push(String::new());
             }
@@ -88,6 +89,9 @@ fn agrees_with_scalibr_over_the_real_archives() {
         panic!("checked {checked} comparisons against osv-scalibr:{report}");
     }
 
-    assert!(checked > 100_000, "corpus too small to prove anything: {checked}");
+    assert!(
+        checked > 100_000,
+        "corpus too small to prove anything: {checked}"
+    );
     eprintln!("{checked} comparisons agree with osv-scalibr");
 }

@@ -64,7 +64,12 @@ fn severity_orders_unknown_lowest() {
         Severity::Critical,
     ];
     for pair in ascending.windows(2) {
-        assert!(pair[0] < pair[1], "{:?} should sort below {:?}", pair[0], pair[1]);
+        assert!(
+            pair[0] < pair[1],
+            "{:?} should sort below {:?}",
+            pair[0],
+            pair[1]
+        );
     }
 }
 
@@ -153,24 +158,44 @@ fn fixed_versions_only_for_the_asked_package() {
         Affected {
             package: lodash.clone(),
             ranges: [
-                AffectedRange { introduced: "0".into(), fixed: "4.17.21".into(), last_affected: Box::default() },
+                AffectedRange {
+                    introduced: "0".into(),
+                    fixed: "4.17.21".into(),
+                    last_affected: Box::default(),
+                },
                 // No fix: contributes nothing.
-                AffectedRange { introduced: "5.0.0".into(), fixed: Box::default(), last_affected: Box::default() },
+                AffectedRange {
+                    introduced: "5.0.0".into(),
+                    fixed: Box::default(),
+                    last_affected: Box::default(),
+                },
             ]
             .into(),
             versions: Box::default(),
         },
         Affected {
             package: other.clone(),
-            ranges: Box::new([AffectedRange { introduced: "0".into(), fixed: "9.9.9".into(), last_affected: Box::default() }]),
+            ranges: Box::new([AffectedRange {
+                introduced: "0".into(),
+                fixed: "9.9.9".into(),
+                last_affected: Box::default(),
+            }]),
             versions: Box::default(),
         },
         Affected {
             package: repeated.clone(),
             ranges: Box::new([
-                AffectedRange { introduced: "0".into(), fixed: "1.2.3".into(), last_affected: Box::default() },
+                AffectedRange {
+                    introduced: "0".into(),
+                    fixed: "1.2.3".into(),
+                    last_affected: Box::default(),
+                },
                 // A second release line, patched in the same release.
-                AffectedRange { introduced: "1.0.0".into(), fixed: "1.2.3".into(), last_affected: Box::default() },
+                AffectedRange {
+                    introduced: "1.0.0".into(),
+                    fixed: "1.2.3".into(),
+                    last_affected: Box::default(),
+                },
             ]),
             versions: Box::default(),
         },
@@ -180,14 +205,21 @@ fn fixed_versions_only_for_the_asked_package() {
     // The same fix on several ranges is reported once, not once per range.
     assert_eq!(a.fixed_versions_for(&repeated), vec!["1.2.3"]);
     assert_eq!(a.fixed_versions_for(&other), vec!["9.9.9"]);
-    assert!(a.fixed_versions_for(&PackageKey::new(Ecosystem::Go, "lodash")).is_empty());
+    assert!(
+        a.fixed_versions_for(&PackageKey::new(Ecosystem::Go, "lodash"))
+            .is_empty()
+    );
 }
 
 #[test]
 fn finding_severity_is_the_worst_advisory() {
     let f = finding(
         Package::new(Ecosystem::Npm, "lodash", "4.17.15"),
-        vec![advisory("GHSA-low", 2.0), advisory("GHSA-high", 7.5), advisory("GHSA-med", 5.0)],
+        vec![
+            advisory("GHSA-low", 2.0),
+            advisory("GHSA-high", 7.5),
+            advisory("GHSA-med", 5.0),
+        ],
     );
     assert_eq!(f.severity(), Severity::High);
     assert_eq!(&*f.worst().id, "GHSA-high");
@@ -204,13 +236,23 @@ fn worst_prefers_the_earlier_advisory_on_a_tie() {
 
 #[test]
 fn direct_means_no_path() {
-    let mut f = finding(Package::new(Ecosystem::Npm, "lodash", "4.17.15"), vec![advisory("GHSA-1", 1.0)]);
+    let mut f = finding(
+        Package::new(Ecosystem::Npm, "lodash", "4.17.15"),
+        vec![advisory("GHSA-1", 1.0)],
+    );
     assert!(f.direct());
     assert!(f.shortest_path().is_none());
 
     f.paths = vec![
-        vec![PackageKey::new(Ecosystem::Npm, "a"), PackageKey::new(Ecosystem::Npm, "b"), PackageKey::new(Ecosystem::Npm, "lodash")],
-        vec![PackageKey::new(Ecosystem::Npm, "c"), PackageKey::new(Ecosystem::Npm, "lodash")],
+        vec![
+            PackageKey::new(Ecosystem::Npm, "a"),
+            PackageKey::new(Ecosystem::Npm, "b"),
+            PackageKey::new(Ecosystem::Npm, "lodash"),
+        ],
+        vec![
+            PackageKey::new(Ecosystem::Npm, "c"),
+            PackageKey::new(Ecosystem::Npm, "lodash"),
+        ],
     ];
     assert!(!f.direct());
     assert_eq!(f.shortest_path().map(<[_]>::len), Some(2));
@@ -218,7 +260,10 @@ fn direct_means_no_path() {
 
 #[test]
 fn dev_reads_the_dep_groups() {
-    let mut f = finding(Package::new(Ecosystem::Npm, "lodash", "4.17.15"), vec![advisory("GHSA-1", 1.0)]);
+    let mut f = finding(
+        Package::new(Ecosystem::Npm, "lodash", "4.17.15"),
+        vec![advisory("GHSA-1", 1.0)],
+    );
     assert!(!f.dev());
     f.dep_groups = vec!["optional".into()];
     assert!(!f.dev());
@@ -228,9 +273,15 @@ fn dev_reads_the_dep_groups() {
 
 #[test]
 fn anchor_site_falls_back_to_evidence() {
-    let mut f = finding(Package::new(Ecosystem::Npm, "lodash", "4.17.15"), vec![advisory("GHSA-1", 1.0)]);
+    let mut f = finding(
+        Package::new(Ecosystem::Npm, "lodash", "4.17.15"),
+        vec![advisory("GHSA-1", 1.0)],
+    );
     f.evidence = site("/p/package-lock.json", 12);
-    assert_eq!(f.anchor_site().path.to_str().unwrap(), "/p/package-lock.json");
+    assert_eq!(
+        f.anchor_site().path.to_str().unwrap(),
+        "/p/package-lock.json"
+    );
 
     f.declared = Some(Anchor::new(site("/p/package.json", 4)));
     assert_eq!(f.anchor_site().path.to_str().unwrap(), "/p/package.json");
@@ -239,11 +290,20 @@ fn anchor_site_falls_back_to_evidence() {
 
 #[test]
 fn report_groups_by_anchor_file() {
-    let mut a = finding(Package::new(Ecosystem::Npm, "a", "1.0.0"), vec![advisory("GHSA-1", 1.0)]);
+    let mut a = finding(
+        Package::new(Ecosystem::Npm, "a", "1.0.0"),
+        vec![advisory("GHSA-1", 1.0)],
+    );
     a.declared = Some(Anchor::new(site("/p/package.json", 2)));
-    let mut b = finding(Package::new(Ecosystem::Npm, "b", "1.0.0"), vec![advisory("GHSA-2", 1.0)]);
+    let mut b = finding(
+        Package::new(Ecosystem::Npm, "b", "1.0.0"),
+        vec![advisory("GHSA-2", 1.0)],
+    );
     b.declared = Some(Anchor::new(site("/p/package.json", 3)));
-    let mut c = finding(Package::new(Ecosystem::Go, "c", "1.0.0"), vec![advisory("GHSA-3", 1.0)]);
+    let mut c = finding(
+        Package::new(Ecosystem::Go, "c", "1.0.0"),
+        vec![advisory("GHSA-3", 1.0)],
+    );
     c.evidence = site("/p/go.mod", 5);
 
     let report = Report::new("/p", vec![a, b, c]);
@@ -262,22 +322,37 @@ fn report_with_no_findings_groups_nothing() {
 fn stringers() {
     let key = PackageKey::new(Ecosystem::Npm, "lodash");
     assert_eq!(key.to_string(), "npm:lodash");
-    assert_eq!(Package::new(Ecosystem::Npm, "lodash", "4.17.15").to_string(), "npm:lodash@4.17.15");
-    assert!(Package::new(Ecosystem::Go, "stdlib", "1.21").key.is_go_toolchain());
+    assert_eq!(
+        Package::new(Ecosystem::Npm, "lodash", "4.17.15").to_string(),
+        "npm:lodash@4.17.15"
+    );
+    assert!(
+        Package::new(Ecosystem::Go, "stdlib", "1.21")
+            .key
+            .is_go_toolchain()
+    );
     assert!(!key.is_go_toolchain());
 }
 
 #[test]
 fn ecosystems_of_is_sorted_and_deduplicated() {
-    let pkgs = [Ecosystem::PyPI, Ecosystem::Npm, Ecosystem::Npm, Ecosystem::Go]
-        .into_iter()
-        .map(|e| ExtractedPackage {
-            package: Package::new(e, "x", "1"),
-            evidence: site("/p/f", 1),
-            declared: None,
-            dep_groups: Vec::new(),
-            from_range: false,
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(ecosystems_of(&pkgs), vec![Ecosystem::Npm, Ecosystem::Go, Ecosystem::PyPI]);
+    let pkgs = [
+        Ecosystem::PyPI,
+        Ecosystem::Npm,
+        Ecosystem::Npm,
+        Ecosystem::Go,
+    ]
+    .into_iter()
+    .map(|e| ExtractedPackage {
+        package: Package::new(e, "x", "1"),
+        evidence: site("/p/f", 1),
+        declared: None,
+        dep_groups: Vec::new(),
+        from_range: false,
+    })
+    .collect::<Vec<_>>();
+    assert_eq!(
+        ecosystems_of(&pkgs),
+        vec![Ecosystem::Npm, Ecosystem::Go, Ecosystem::PyPI]
+    );
 }

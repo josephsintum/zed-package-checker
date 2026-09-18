@@ -41,8 +41,7 @@ fn sighting(
 // ---------------------------------------------------------------- package.json
 
 pub fn package_json(src: &str, path: &Path) -> Vec<ExtractedPackage> {
-    let Ok(parsed) = parse_to_ast(src, &CollectOptions::default(), &ParseOptions::default())
-    else {
+    let Ok(parsed) = parse_to_ast(src, &CollectOptions::default(), &ParseOptions::default()) else {
         return Vec::new();
     };
     let Some(Value::Object(root)) = parsed.value else {
@@ -56,9 +55,15 @@ pub fn package_json(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             continue;
         };
         for prop in &deps.properties {
-            let Some((name, range)) = prop_name(&prop.name) else { continue };
-            let Value::StringLit(constraint) = &prop.value else { continue };
-            let Some(version) = lowest_satisfying(&constraint.value) else { continue };
+            let Some((name, range)) = prop_name(&prop.name) else {
+                continue;
+            };
+            let Value::StringLit(constraint) = &prop.value else {
+                continue;
+            };
+            let Some(version) = lowest_satisfying(&constraint.value) else {
+                continue;
+            };
             out.push(sighting(
                 Ecosystem::Npm,
                 name,
@@ -74,7 +79,6 @@ pub fn package_json(src: &str, path: &Path) -> Vec<ExtractedPackage> {
     }
     out
 }
-
 
 /// The lowest version a constraint admits, which is what is scanned when there
 /// is no lockfile to say what is installed.
@@ -106,8 +110,7 @@ fn lowest_satisfying(constraint: &str) -> Option<&str> {
 // ----------------------------------------------------------- package-lock.json
 
 pub fn package_lock(src: &str, path: &Path) -> Vec<ExtractedPackage> {
-    let Ok(parsed) = parse_to_ast(src, &CollectOptions::default(), &ParseOptions::default())
-    else {
+    let Ok(parsed) = parse_to_ast(src, &CollectOptions::default(), &ParseOptions::default()) else {
         return Vec::new();
     };
     let Some(Value::Object(root)) = parsed.value else {
@@ -133,16 +136,24 @@ pub fn package_lock(src: &str, path: &Path) -> Vec<ExtractedPackage> {
 fn lock_packages(packages: &Object<'_>, path: &Path, lines: &LineIndex) -> Vec<ExtractedPackage> {
     let mut out = Vec::new();
     for prop in &packages.properties {
-        let Some((key, range)) = prop_name(&prop.name) else { continue };
+        let Some((key, range)) = prop_name(&prop.name) else {
+            continue;
+        };
         // The empty key is the project itself, which is not its own dependency.
-        let Some(offset) = key.rfind("node_modules/") else { continue };
+        let Some(offset) = key.rfind("node_modules/") else {
+            continue;
+        };
         let name_start = offset + "node_modules/".len();
         let name = &key[name_start..];
         if name.is_empty() {
             continue;
         }
-        let Value::Object(entry) = &prop.value else { continue };
-        let Some(Value::StringLit(version)) = property(entry, "version") else { continue };
+        let Value::Object(entry) = &prop.value else {
+            continue;
+        };
+        let Some(Value::StringLit(version)) = property(entry, "version") else {
+            continue;
+        };
 
         // The span covers the package name inside the install path, not the
         // whole `node_modules/...` key.
@@ -161,15 +172,14 @@ fn lock_packages(packages: &Object<'_>, path: &Path, lines: &LineIndex) -> Vec<E
 }
 
 /// The nested `dependencies` tree of lockfile version 1.
-fn lock_tree(
-    deps: &Object<'_>,
-    path: &Path,
-    lines: &LineIndex,
-    out: &mut Vec<ExtractedPackage>,
-) {
+fn lock_tree(deps: &Object<'_>, path: &Path, lines: &LineIndex, out: &mut Vec<ExtractedPackage>) {
     for prop in &deps.properties {
-        let Some((name, range)) = prop_name(&prop.name) else { continue };
-        let Value::Object(entry) = &prop.value else { continue };
+        let Some((name, range)) = prop_name(&prop.name) else {
+            continue;
+        };
+        let Value::Object(entry) = &prop.value else {
+            continue;
+        };
         if let Some(Value::StringLit(version)) = property(entry, "version") {
             out.push(sighting(
                 Ecosystem::Npm,
@@ -269,7 +279,10 @@ fn require_line(
     lines: &LineIndex,
 ) -> Option<ExtractedPackage> {
     let body = full_line.trim_start_matches(|c: char| c.is_whitespace());
-    let body = body.strip_prefix("require").map(str::trim_start).unwrap_or(body);
+    let body = body
+        .strip_prefix("require")
+        .map(str::trim_start)
+        .unwrap_or(body);
     let mut parts = body.split_whitespace();
     let module = parts.next()?;
     let version = parts.next()?;
@@ -346,7 +359,11 @@ pub fn cargo_toml(src: &str, path: &Path) -> Vec<ExtractedPackage> {
             version,
             path,
             lines.range(start + name_span.0, start + name_span.1),
-            CARGO_SECTIONS[index].1.map(str::to_owned).into_iter().collect(),
+            CARGO_SECTIONS[index]
+                .1
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
             // Cargo versions are constraints — `"0.1.44"` means `^0.1.44` — so
             // what is installed comes from the lockfile, never from here.
             true,
@@ -437,7 +454,9 @@ pub fn cargo_lock(src: &str, path: &Path) -> Vec<ExtractedPackage> {
 fn cargo_section(header: &str) -> Option<usize> {
     let name = header.trim_matches(['[', ']']);
     let name = name.rsplit('.').next().unwrap_or(name).trim();
-    CARGO_SECTIONS.iter().position(|(section, _)| *section == name)
+    CARGO_SECTIONS
+        .iter()
+        .position(|(section, _)| *section == name)
 }
 
 /// One `crate = ...` line, as (name, span of the name, version).
@@ -645,4 +664,3 @@ fn prop_name<'a>(name: &'a ObjectPropName<'a>) -> Option<(&'a str, (usize, usize
         ObjectPropName::Word(w) => Some((w.value, (w.range.start, w.range.end))),
     }
 }
-

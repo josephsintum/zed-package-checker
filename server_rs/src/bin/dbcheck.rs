@@ -126,9 +126,7 @@ fn main() -> std::process::ExitCode {
                 ranges += f.ranges.len() * size_of::<package_checker::model::AffectedRange>()
                     + f.ranges
                         .iter()
-                        .map(|r| {
-                            r.introduced.len() + r.fixed.len() + r.last_affected.len()
-                        })
+                        .map(|r| r.introduced.len() + r.fixed.len() + r.last_affected.len())
                         .sum::<usize>();
                 versions += f.versions.len() * size_of::<Box<str>>()
                     + f.versions.iter().map(|s| s.len()).sum::<usize>();

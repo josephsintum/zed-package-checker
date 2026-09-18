@@ -131,6 +131,33 @@ func TestAdvisoryMalicious(t *testing.T) {
 	}
 }
 
+func TestAdvisoryMaliciousReadsTheAliases(t *testing.T) {
+	// How OSV files the npm compromises: a GHSA ID, with the canonical MAL-
+	// identifier reachable only through the aliases.
+	tests := []struct {
+		name    string
+		aliases []string
+		want    bool
+	}{
+		{"canonical id in the aliases", []string{"MAL-2026-1380"}, true},
+		{"alongside a CVE", []string{"CVE-2024-1", "MAL-2024-5"}, true},
+		{"no MAL- anywhere", []string{"CVE-2024-1", "GHSA-y"}, false},
+		{"prefix is exact on an alias too", []string{"MALFORMED-1"}, false},
+		{"no aliases at all", nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := Advisory{ID: "GHSA-9ppg-jx86-fqw7", Aliases: tt.aliases}
+			if got := a.Malicious(); got != tt.want {
+				t.Errorf("Malicious() = %v, want %v", got, tt.want)
+			}
+			if tt.want && a.Severity() != SeverityCritical {
+				t.Errorf("Severity() = %v, want %v", a.Severity(), SeverityCritical)
+			}
+		})
+	}
+}
+
 func TestAdvisoryMaliciousOutranksScore(t *testing.T) {
 	// A malicious package with a low or absent score is still critical.
 	a := Advisory{ID: "MAL-2024-1", CVSSScore: 0.1}

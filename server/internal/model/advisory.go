@@ -111,9 +111,17 @@ type Advisory struct {
 }
 
 // Malicious reports whether the package is malicious rather than vulnerable.
-// Derived from the ID so it cannot drift.
+//
+// Reads the aliases as well as the ID: OSV files some confirmed-malicious
+// events under a GHSA- ID, naming the canonical MAL- one only as an alias. Not
+// Related, which means "see also".
 func (a Advisory) Malicious() bool {
-	return strings.HasPrefix(a.ID, maliciousIDPrefix)
+	if strings.HasPrefix(a.ID, maliciousIDPrefix) {
+		return true
+	}
+	return slices.ContainsFunc(a.Aliases, func(alias string) bool {
+		return strings.HasPrefix(alias, maliciousIDPrefix)
+	})
 }
 
 // Severity returns the qualitative severity. Malicious packages are always

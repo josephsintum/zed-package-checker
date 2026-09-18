@@ -677,6 +677,48 @@ re-reads without a restart — plus README with **CC-BY 4.0 attribution for OSV/
 | Monorepo scan cost | User-facing `exclude` and `maxScanSeconds` settings; skip list is config-driven from Stage 3 |
 | Python `toolchain` in the server key may spawn extra instances | Stage 13 |
 
+## What a fifth ecosystem actually costs
+
+Measured against `server_rs/`, which has the same four ecosystems in one flat
+crate. Traced rather than estimated: fifteen sites, of which **eleven are
+compiler-enforced or need no change at all.**
+
+`db.rs` and `osv.rs` need **zero** changes, because both route through
+`Ecosystem::as_str()` and `FromStr`, which route through `Ecosystem::ALL`. The
+closed enum and the fixed-length `ALL` array turn most of the work into compile
+errors: adding a variant breaks the array length, `as_str`, and `Version::parse`
+until each is answered.
+
+| Addition | Edited lines | New code |
+|---|---:|---|
+| RubyGems (`Gemfile.lock`) | ~10 across 6 files | ~110 parser, no new comparator, no new dependency |
+| Composer (`composer.lock`) | ~10 | ~120 parser, reuses `jsonc-parser` |
+| Maven (`pom.xml`) | ~10 | ~250 parser + ~180 comparator + an XML dependency |
+
+The ranking is the finding. Maven is expensive not because of the enum but
+because `pom.xml` needs `<parent>` inheritance, `${property}` substitution and
+`<dependencyManagement>` BOM imports — a line-based reader does not survive
+`${spring.version}` — and Maven's version ordering is its own grammar. Composer
+and RubyGems are an afternoon each.
+
+**Four sites are not compiler-enforced, and they are the same mistake four
+times:** a string-keyed dispatch that should be a table keyed by the closed enum
+— `from_purl_type`, the extractor's `parser_for`, the LSP layer's `MANIFESTS`,
+and the summary anchor's filename match. They have already drifted: `MANIFESTS`
+watches seven files nothing parses (`yarn.lock`, `pnpm-lock.yaml`, `bun.lock`,
+`go.sum`, `pyproject.toml`, `poetry.lock`, `uv.lock`), and the summary anchor
+names `pyproject.toml`, which no parser reads. The consequence today is only a
+spurious rescan, but it is the seam a fifth ecosystem will be added through.
+
+The fix is about twenty lines — one `const FORMATS: [(Ecosystem, &str, Parser)]`
+with the other four derived from it — and it is a simplification, not
+architecture. **Do it when a fifth ecosystem is actually being added.** With four
+and no concrete plan it is a refactor with no forcing function, and the design
+otherwise holds: the per-ecosystem job here is parsing alone, with no registry
+client, no completion provider and no network client behind it, so the trait and
+per-ecosystem crate layout that a version-checking tool needs would be pure
+overhead.
+
 ## Not in scope for v1
 
 Vulnerable-API-usage for npm and Python (needs Mend-style symbol data no open source provides); installed-package scanning for exact versions; pnpm/yarn/bun transitive graphs; Maven/Gradle/Composer/Ruby; commit blocking; a dedicated tool-window UI — Zed's diagnostics panel is the UI.

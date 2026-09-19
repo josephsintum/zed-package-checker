@@ -36,8 +36,8 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
         out.push(summary);
     }
     out.extend(findings.iter().filter_map(|finding| {
-        let fixable = crate::extract::version_span(&sightings, finding).is_some();
-        finding_diagnostic(finding, fixable)
+        let version = crate::extract::version_span(&sightings, finding);
+        finding_diagnostic(finding, version)
     }));
 
     if encoding == Encoding::Utf16
@@ -51,12 +51,22 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
     out
 }
 
-fn finding_diagnostic(finding: &Finding, fixable: bool) -> Option<Diagnostic> {
+fn finding_diagnostic(
+    finding: &Finding,
+    version: Option<crate::model::Range>,
+) -> Option<Diagnostic> {
     let worst = finding.worst()?;
     let anchor = finding.anchor_site();
+    let fixable = version.is_some();
 
     let mut diagnostic = Diagnostic {
-        range: to_range(anchor.range),
+        // The version where this file is where it is written, since that is
+        // what the user would change — and byte for byte what the quick fix
+        // rewrites, so the squiggle shows exactly what pressing the key does.
+        // Otherwise the name that put the package here: a transitive
+        // dependency has no version on this line, and a lockfile is never
+        // rewritten at all.
+        range: to_range(version.unwrap_or(anchor.range)),
         severity: Some(severity_for(finding)),
         code: Some(NumberOrString::String(worst.id.to_string())),
         code_description: worst
@@ -151,6 +161,13 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
     if !parts.is_empty() {
         message.push_str(&format!(" ({})", parts.join(", ")));
     }
+    // Said out loud because the two are acted on differently: a direct one is
+    // a version to edit on this line, a transitive one is a dependency to
+    // chase somewhere else.
+    let transitive = findings.iter().filter(|f| !f.direct()).count();
+    if transitive > 0 {
+        message.push_str(&format!(", {transitive} of them transitive"));
+    }
     if malicious > 0 {
         message.push_str(&format!(" — {malicious} MALICIOUS"));
     }
@@ -213,10 +230,15 @@ fn message_for(finding: &Finding, fixable: bool) -> String {
     if finding.from_range {
         message.push_str(". Version inferred from a range, so the installed one may differ");
     }
-    if resolved_elsewhere(finding) {
-        message.push_str(
+    // A transitive dependency gets the chain instead: the file names no
+    // version for it at all, so "editing this file alone will not clear it"
+    // would send the reader hunting the line for a version that is not there.
+    match pulled_in_by(finding) {
+        Some(clause) => message.push_str(&clause),
+        None if resolved_elsewhere(finding) => message.push_str(
             ". Version comes from the lockfile, so editing this file alone will not clear it",
-        );
+        ),
+        None => {}
     }
     if finding.dev() {
         message.push_str(". Development dependency");
@@ -227,6 +249,41 @@ fn message_for(finding: &Finding, fixable: bool) -> String {
         message.push_str(&format!(". Press {FIX_KEY} to update to {version}"));
     }
     message
+}
+
+/// How many hops of a chain are named before the rest is elided.
+///
+/// Four is already past the point where a reader is scanning rather than
+/// reading, and the first is the only one on the line they can edit.
+const MAX_HOPS: usize = 4;
+
+/// The clause naming what pulled a transitive dependency in.
+///
+/// The direct dependency comes first, because it is the one the diagnostic sits
+/// on and the only one in the chain the user can edit. `None` for a direct
+/// dependency, which nothing pulled in.
+fn pulled_in_by(finding: &Finding) -> Option<String> {
+    // The chain ends with the package itself, which the message has named already.
+    let (_, hops) = finding.shortest_path()?.split_last()?;
+    if hops.is_empty() {
+        return None;
+    }
+    let mut clause = String::from(". Pulled in by ");
+    let named: Vec<&str> = hops
+        .iter()
+        .take(MAX_HOPS)
+        .map(|key| key.name.as_ref())
+        .collect();
+    clause.push_str(&named.join(" → "));
+    if hops.len() > MAX_HOPS {
+        clause.push_str(" → …");
+    }
+    match finding.paths.len() {
+        0 | 1 => {}
+        2 => clause.push_str(", and 1 other path"),
+        n => clause.push_str(&format!(", and {} other paths", n - 1)),
+    }
+    Some(clause)
 }
 
 /// How much is wrong and how bad, omitting a severity nobody published rather
@@ -400,6 +457,22 @@ mod tests {
         }
     }
 
+    /// A finding reached through `chain`, which ends with the package itself,
+    /// anchored on the direct dependency's line in the manifest.
+    fn transitive(chain: &[&str]) -> Finding {
+        let package = Package::new(Ecosystem::Npm, chain[chain.len() - 1], "1.2.0");
+        Finding {
+            package,
+            paths: vec![
+                chain
+                    .iter()
+                    .map(|name| crate::model::PackageKey::new(Ecosystem::Npm, *name))
+                    .collect(),
+            ],
+            ..lockfile_resolved()
+        }
+    }
+
     fn with(name: &str, score: f64, line: u32) -> Finding {
         Finding {
             package: Package::new(Ecosystem::Npm, name, "1.0.0"),
@@ -495,18 +568,168 @@ mod tests {
         }
 
         #[test]
-        fn the_lockfile_clause_and_the_related_link_agree() {
-            // Both derive from `resolved_elsewhere`, so a diagnostic can never
-            // carry the link without the sentence or the other way round.
+        fn the_lockfile_clause_and_the_related_link_agree_for_a_direct_finding() {
+            // Both derive from `resolved_elsewhere`, so a direct diagnostic can
+            // never carry the link without the sentence or the other way round.
             for f in [finding(), lockfile_resolved()] {
                 let says = message_for(&f, false).contains("lockfile");
-                let links = finding_diagnostic(&f, false)
+                let links = finding_diagnostic(&f, None)
                     .expect("a finding with advisories renders")
                     .related_information
                     .is_some();
                 assert_eq!(says, links, "{}", message_for(&f, false));
             }
         }
+
+        #[test]
+        fn a_transitive_finding_never_claims_the_line_holds_its_version() {
+            // The file names `mkdirp`, not `minimist`. Telling the reader that
+            // editing this file will not clear it sends them hunting a version
+            // that is not on the line at all.
+            let message = message_for(&transitive(&["mkdirp", "minimist"]), false);
+            assert!(!message.contains("lockfile"), "{message}");
+            assert!(message.contains("Pulled in by mkdirp"), "{message}");
+        }
+
+        #[test]
+        fn a_deeper_chain_names_every_hop() {
+            let message = message_for(&transitive(&["mkdirp", "minipass", "minimist"]), false);
+            assert!(message.contains("Pulled in by mkdirp → minipass"), "{message}");
+        }
+
+        #[test]
+        fn a_very_deep_chain_is_elided_rather_than_read_out() {
+            let message = message_for(&transitive(&["a", "b", "c", "d", "e", "target"]), false);
+            assert!(message.contains("Pulled in by a → b → c → d → …"), "{message}");
+        }
+
+        #[test]
+        fn other_ways_in_are_counted_rather_than_listed() {
+            let mut f = transitive(&["express", "body-parser", "qs"]);
+            f.paths.push(vec![
+                crate::model::PackageKey::new(Ecosystem::Npm, "other"),
+                crate::model::PackageKey::new(Ecosystem::Npm, "qs"),
+            ]);
+            let message = message_for(&f, false);
+            assert!(message.contains("and 1 other path"), "{message}");
+        }
+
+        #[test]
+        fn a_direct_finding_is_told_nothing_about_a_chain() {
+            assert!(!message_for(&finding(), false).contains("Pulled in by"));
+        }
+
+        #[test]
+        fn a_transitive_finding_still_links_to_where_it_resolved() {
+            let d = finding_diagnostic(&transitive(&["mkdirp", "minimist"]), None)
+                .expect("a finding with advisories renders");
+            assert!(d.related_information.is_some());
+        }
+
+    mod spans {
+        use super::*;
+
+        /// `"lodash"` sits at columns 5..11 of line 2, its version at 16..22.
+        const MANIFEST: &str = "{\n  \"dependencies\": {\n    \"lodash\": \"^4.17.0\"\n  }\n}\n";
+
+        /// The text one finding's diagnostic actually underlines.
+        ///
+        /// Written to a real file because `for_file` reads the manifest to
+        /// locate the version — the other tests here pass a path that does not
+        /// exist, and so only ever exercise the no-source path.
+        fn underlined(build: impl FnOnce(&Path) -> Finding) -> String {
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let path = dir.path().join("package.json");
+            std::fs::write(&path, MANIFEST).expect("write the manifest");
+
+            let finding = build(&path);
+            let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
+            let diagnostic = rendered
+                .iter()
+                .find(|d| d.code != Some(NumberOrString::String("summary".to_owned())))
+                .expect("the finding renders");
+            let line = MANIFEST
+                .lines()
+                .nth(diagnostic.range.start.line as usize)
+                .expect("the span names a line that exists");
+            line[diagnostic.range.start.character as usize
+                ..diagnostic.range.end.character as usize]
+                .to_owned()
+        }
+
+        /// A finding anchored on `lodash`'s name, as the parser reports it.
+        fn on_lodash(path: &Path) -> Site {
+            Site::new(path, crate::model::Range::on_line(2, 5, 11))
+        }
+
+        #[test]
+        fn a_direct_finding_underlines_the_version() {
+            assert_eq!(
+                underlined(|path| Finding {
+                    evidence: on_lodash(path),
+                    declared: None,
+                    ..finding()
+                }),
+                "4.17.0"
+            );
+        }
+
+        #[test]
+        fn the_operator_is_left_outside_the_span() {
+            // `>=1.0 <2.0` has to keep its upper bound when the lower one is
+            // bumped, which is why the parser narrows to the digits at all.
+            assert!(!underlined(|path| Finding {
+                evidence: on_lodash(path),
+                declared: None,
+                ..finding()
+            })
+            .contains('^'));
+        }
+
+        #[test]
+        fn replacing_the_underlined_text_is_what_the_quick_fix_does() {
+            // The diagnostic range and the edit range are one range, so the
+            // squiggle shows exactly which bytes pressing the key replaces.
+            let text = underlined(|path| Finding {
+                evidence: on_lodash(path),
+                declared: None,
+                ..finding()
+            });
+            let updated = MANIFEST.replacen(&text, "4.18.0", 1);
+            assert!(updated.contains("\"^4.18.0\""), "{updated}");
+        }
+
+        #[test]
+        fn a_transitive_finding_underlines_the_dependency_that_reaches_it() {
+            // Nothing on this line is `minimist`'s version, so the name of the
+            // thing that pulled it in is the only honest thing to point at.
+            assert_eq!(
+                underlined(|path| Finding {
+                    declared: Some(Anchor::new(on_lodash(path))),
+                    evidence: Site::new(
+                        path.with_file_name("package-lock.json"),
+                        crate::model::Range::whole_line(9)
+                    ),
+                    ..transitive(&["lodash", "minimist"])
+                }),
+                "lodash"
+            );
+        }
+
+        #[test]
+        fn a_summary_says_how_many_are_transitive() {
+            let findings = [
+                Finding {
+                    evidence: Site::new("/p/package.json", crate::model::Range::whole_line(3)),
+                    ..finding()
+                },
+                transitive(&["lodash", "minimist"]),
+            ];
+            let rendered = summary(Path::new("/p/package.json"), &findings, Some(MANIFEST))
+                .expect("two findings summarise");
+            assert!(rendered.message.contains("1 of them transitive"), "{}", rendered.message);
+        }
+    }
 
         #[test]
         fn a_fixable_finding_says_which_key_applies_it() {
@@ -690,7 +913,7 @@ mod tests {
             // A consumer testing for the key must not be handed `null`, which is
             // what `Option` serialised to before.
             for fix in [Fix::None, Fix::Partial] {
-                let data = finding_diagnostic(&Finding { fix, ..finding() }, false)
+                let data = finding_diagnostic(&Finding { fix, ..finding() }, None)
                     .expect("a finding with advisories renders")
                     .data
                     .expect("data");
@@ -702,7 +925,7 @@ mod tests {
                     fix: Fix::Clears("4.18.0".into()),
                     ..finding()
                 },
-                false,
+                None,
             )
             .expect("a finding with advisories renders")
             .data
@@ -721,7 +944,7 @@ mod tests {
                 ))),
                 ..lockfile_resolved()
             };
-            let d = finding_diagnostic(&f, false).expect("a finding with advisories renders");
+            let d = finding_diagnostic(&f, None).expect("a finding with advisories renders");
             assert_eq!(d.range.start.line, 4, "want the manifest line");
             let related = d.related_information.expect("a link to the lockfile");
             assert_eq!(related.len(), 1);
@@ -741,7 +964,7 @@ mod tests {
                 fix: Fix::Clears("9.9.9".into()),
                 ..finding()
             };
-            let data = finding_diagnostic(&fixed, true)
+            let data = finding_diagnostic(&fixed, Some(crate::model::Range::on_line(3, 4, 11)))
                 .expect("a finding with advisories renders")
                 .data
                 .unwrap();
@@ -752,7 +975,7 @@ mod tests {
             assert_eq!(data["direct"], true);
             assert_eq!(data["advisories"], serde_json::json!(["GHSA-1"]));
 
-            let data = finding_diagnostic(&finding(), false)
+            let data = finding_diagnostic(&finding(), None)
                 .expect("a finding with advisories renders")
                 .data
                 .unwrap();

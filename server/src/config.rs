@@ -7,6 +7,10 @@
 
 use serde::Deserialize;
 
+/// The server's name: the `source` on every diagnostic, and what `serverInfo`
+/// reports.
+pub const NAME: &str = "package-checker";
+
 /// The whole user-facing surface.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]

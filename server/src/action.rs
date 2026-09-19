@@ -12,9 +12,8 @@
 //! upstream has to change, and the text parsed is the buffer the user is
 //! looking at rather than whatever was last saved.
 
-use crate::diagnostics;
 use crate::extract::parser_for;
-use crate::model::{ExtractedPackage, Finding, Fix, Range};
+use crate::model::{Finding, Fix, Range};
 use crate::span::{Encoding, column};
 use std::path::Path;
 use tower_lsp_server::ls_types::{
@@ -48,7 +47,7 @@ pub fn upgrades(
                 return None;
             };
             let diagnostic = selects(params, finding)?;
-            let span = version_span(&sightings, finding)?;
+            let span = crate::extract::version_span(&sightings, finding)?;
 
             Some(CodeActionOrCommand::CodeAction(CodeAction {
                 title: title(finding, target, path),
@@ -83,7 +82,7 @@ fn selects<'a>(params: &'a CodeActionParams, finding: &Finding) -> Option<Option
         .context
         .diagnostics
         .iter()
-        .filter(|d| d.source.as_deref() == Some(diagnostics::NAME))
+        .filter(|d| d.source.as_deref() == Some(crate::config::NAME))
         .collect();
     if ours.is_empty() {
         let anchor = finding.anchor_site().range;
@@ -95,32 +94,6 @@ fn selects<'a>(params: &'a CodeActionParams, finding: &Finding) -> Option<Option
     ours.into_iter()
         .find(|d| matches!(&d.code, Some(NumberOrString::String(id)) if *id == *worst.id))
         .map(Some)
-}
-
-/// Where this finding's version is written in the text just parsed.
-///
-/// The finding's anchor was produced by the same parser over the file on disk,
-/// so an untouched buffer matches it exactly. Once the buffer has been edited
-/// the positions no longer line up, and the package name is all that is left to
-/// go on — accepted only when it names one declaration, since picking between
-/// `dependencies` and `devDependencies` by guesswork would edit the wrong one.
-pub(crate) fn version_span(sightings: &[ExtractedPackage], finding: &Finding) -> Option<Range> {
-    let named = || {
-        sightings.iter().filter(|s| {
-            s.package.ecosystem() == finding.package.ecosystem()
-                && s.package.name() == finding.package.name()
-        })
-    };
-    let anchor = finding.anchor_site().range;
-    if let Some(exact) = named().find(|s| s.evidence.range == anchor) {
-        return exact.version_span;
-    }
-    let mut candidates = named();
-    let only = candidates.next()?;
-    if candidates.next().is_some() {
-        return None;
-    }
-    only.version_span
 }
 
 fn title(finding: &Finding, target: &str, path: &Path) -> String {
@@ -238,7 +211,7 @@ mod tests {
             context: CodeActionContext {
                 diagnostics: vec![Diagnostic {
                     range,
-                    source: Some(diagnostics::NAME.to_owned()),
+                    source: Some(crate::config::NAME.to_owned()),
                     code: Some(NumberOrString::String("GHSA-1".to_owned())),
                     ..Default::default()
                 }],

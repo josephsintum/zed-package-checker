@@ -12,9 +12,6 @@ use tower_lsp_server::ls_types::{
     NumberOrString, Position, Range, Uri,
 };
 
-/// The `source` field on every diagnostic, and the server's name.
-pub const NAME: &str = "package-checker";
-
 /// One file's diagnostics: one per finding, plus a summary when there is more
 /// than one thing wrong.
 pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Diagnostic> {
@@ -39,7 +36,7 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
         out.push(summary);
     }
     out.extend(findings.iter().map(|finding| {
-        let fixable = crate::action::version_span(&sightings, finding).is_some();
+        let fixable = crate::extract::version_span(&sightings, finding).is_some();
         finding_diagnostic(finding, fixable)
     }));
 
@@ -67,7 +64,7 @@ fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
             .parse::<Uri>()
             .ok()
             .map(|href| CodeDescription { href }),
-        source: Some(NAME.to_owned()),
+        source: Some(crate::config::NAME.to_owned()),
         message: message_for(finding, fixable),
         ..Default::default()
     };
@@ -163,7 +160,7 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
         range: to_range(crate::model::Range::whole_line(line)),
         severity: Some(severity_level(worst, false, None)),
         code: Some(NumberOrString::String("summary".to_owned())),
-        source: Some(NAME.to_owned()),
+        source: Some(crate::config::NAME.to_owned()),
         message,
         data: Some(serde_json::json!({ "summary": true, "path": path.to_string_lossy() })),
         ..Default::default()

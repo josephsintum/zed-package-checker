@@ -5,7 +5,7 @@
 //! the dependency's name.
 
 use crate::manifest;
-use crate::model::{ExtractedPackage, Package, PackageKey, Site};
+use crate::model::{ExtractedPackage, Finding, Package, PackageKey, Range, Site};
 use ignore::WalkBuilder;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -197,6 +197,32 @@ fn unwalked_includes(path: &Path, source: &str) -> Vec<PathBuf> {
         .map(|target| dir.join(target))
         .filter(|target| parser_for(target).is_none())
         .collect()
+}
+
+/// Where this finding's version is written in the text just parsed.
+///
+/// The finding's anchor was produced by the same parser over the file on disk,
+/// so an untouched buffer matches it exactly. Once the buffer has been edited
+/// the positions no longer line up, and the package name is all that is left to
+/// go on — accepted only when it names one declaration, since picking between
+/// `dependencies` and `devDependencies` by guesswork would edit the wrong one.
+pub(crate) fn version_span(sightings: &[ExtractedPackage], finding: &Finding) -> Option<Range> {
+    let named = || {
+        sightings.iter().filter(|s| {
+            s.package.ecosystem() == finding.package.ecosystem()
+                && s.package.name() == finding.package.name()
+        })
+    };
+    let anchor = finding.anchor_site().range;
+    if let Some(exact) = named().find(|s| s.evidence.range == anchor) {
+        return exact.version_span;
+    }
+    let mut candidates = named();
+    let only = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
+    }
+    only.version_span
 }
 
 /// Whether a filename is one some parser reads.

@@ -269,7 +269,7 @@ impl LanguageServer for Backend {
 
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
-                name: diagnostics::NAME.to_owned(),
+                name: crate::config::NAME.to_owned(),
                 version: Some(self.version.clone()),
             }),
             // A clangd extension this server does not implement; the

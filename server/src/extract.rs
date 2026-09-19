@@ -651,6 +651,93 @@ mod tests {
             .collect()
     }
 
+    mod precedence {
+        use super::*;
+
+        fn npm(name: &str, version: &str, declared_in: &str, line: u32) -> ExtractedPackage {
+            ExtractedPackage {
+                package: Package::new(crate::model::Ecosystem::Npm, name, version),
+                evidence: Site::new("/p/package-lock.json", Range::on_line(9, 0, 1)),
+                declared: Some(Site::new(declared_in, Range::on_line(line, 0, 1))),
+                dep_groups: Vec::new(),
+                from_range: false,
+                version_span: None,
+                paths: Vec::new(),
+            }
+        }
+
+        fn via(hops: &[&str], sighting: ExtractedPackage) -> ExtractedPackage {
+            sighting.with_paths(vec![
+                hops.iter()
+                    .map(|name| PackageKey::new(crate::model::Ecosystem::Npm, *name))
+                    .collect(),
+            ])
+        }
+
+        /// What survives for one package, as `version [via a>b]`.
+        fn survivor(sightings: Vec<ExtractedPackage>) -> String {
+            let out = reconcile(sightings, &Attributed::default());
+            assert_eq!(out.len(), 1, "one anchor, one package: {out:?}");
+            let hops: Vec<&str> = out[0]
+                .paths
+                .first()
+                .and_then(|path| path.split_last())
+                .map(|(_, hops)| hops.iter().map(|key| &*key.name).collect())
+                .unwrap_or_default();
+            format!("{} via {}", out[0].package.version, hops.join(">"))
+        }
+
+        #[test]
+        fn a_declared_dependency_outranks_one_reached_through_something_else() {
+            // Telling users their own declaration is transitive is worse than
+            // saying nothing, so this must not depend on which the walk saw
+            // first — which is the order `WalkBuilder` happened to return.
+            let direct = npm("lodash", "4.17.15", "/p/package.json", 3);
+            let reached = via(&["express", "lodash"], direct.clone());
+            assert_eq!(survivor(vec![direct.clone(), reached.clone()]), "4.17.15 via ");
+            assert_eq!(survivor(vec![reached, direct]), "4.17.15 via ");
+        }
+
+        #[test]
+        fn the_shorter_chain_wins_between_two_transitive_answers() {
+            let at = npm("cookie", "0.4.0", "/p/package.json", 3);
+            let near = via(&["express", "cookie"], at.clone());
+            let far = via(&["a", "b", "cookie"], at);
+            assert_eq!(survivor(vec![far.clone(), near.clone()]), "0.4.0 via express");
+            assert_eq!(survivor(vec![near, far]), "0.4.0 via express");
+        }
+    }
+
+    mod groups {
+        use super::*;
+
+        #[test]
+        fn a_package_reached_by_any_shipping_route_is_not_demoted() {
+            // Empty means it ships. Previously the first non-empty set won, so
+            // whether a finding was demoted depended on directory order — and
+            // `dev()` feeds the severity that gets published.
+            let ships: Vec<String> = Vec::new();
+            let dev = vec![crate::model::DEV_GROUP.to_owned()];
+            assert!(merged_groups(&ships, &dev).is_empty());
+            assert!(merged_groups(&dev, &ships).is_empty());
+        }
+
+        #[test]
+        fn groups_that_both_agree_on_survive_together() {
+            let dev = vec![crate::model::DEV_GROUP.to_owned()];
+            let optional = vec!["optional".to_owned()];
+            assert_eq!(merged_groups(&dev, &optional), ["dev", "optional"]);
+            // Order of arrival must not change the answer.
+            assert_eq!(merged_groups(&optional, &dev), ["dev", "optional"]);
+        }
+
+        #[test]
+        fn a_repeated_group_is_not_listed_twice() {
+            let dev = vec![crate::model::DEV_GROUP.to_owned()];
+            assert_eq!(merged_groups(&dev, &dev), ["dev"]);
+        }
+    }
+
     #[test]
     fn an_empty_directory_yields_nothing() {
         // The server starts for nearly every project, so most workspaces have

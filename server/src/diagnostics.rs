@@ -717,6 +717,37 @@ mod tests {
         }
 
         #[test]
+        fn a_transitive_finding_points_at_the_lockfile_line_it_resolved_on() {
+            // The gate for this stage: the diagnostic sits on a manifest line
+            // the file never mentions the package on, so the link to where it
+            // actually resolved is the only way to see why it is there. Driven
+            // through `for_file` rather than the private renderer, since that
+            // is the path the server publishes from.
+            let dir = tempfile::tempdir().expect("a temporary directory");
+            let path = dir.path().join("package.json");
+            std::fs::write(&path, MANIFEST).expect("write the manifest");
+            let lockfile = path.with_file_name("package-lock.json");
+
+            let finding = Finding {
+                declared: Some(Anchor::new(on_lodash(&path))),
+                evidence: Site::new(&lockfile, crate::model::Range::whole_line(9)),
+                ..transitive(&["lodash", "minimist"])
+            };
+            let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
+            let linked = rendered
+                .iter()
+                .find_map(|d| d.related_information.as_ref())
+                .expect("a transitive finding links to its lockfile line");
+            assert_eq!(linked.len(), 1);
+            assert!(
+                linked[0].location.uri.as_str().ends_with("package-lock.json"),
+                "{:?}",
+                linked[0].location.uri
+            );
+            assert_eq!(linked[0].location.range.start.line, 8, "the lockfile line");
+        }
+
+        #[test]
         fn a_summary_says_how_many_are_transitive() {
             let findings = [
                 Finding {

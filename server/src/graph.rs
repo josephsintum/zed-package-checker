@@ -630,6 +630,34 @@ mod tests {
     }
 
     #[test]
+    fn one_parent_reaching_a_package_by_two_names_is_counted_once() {
+        // `a` depends on `shared` and on an alias that links to the same entry,
+        // and `q` got there first. Without a guard `a` is recorded as an
+        // alternate way in twice, and the message says "2 other paths" when
+        // there is only one.
+        let src = v3(&[
+            ("", r#"{"name": "root"}"#),
+            (
+                "node_modules/q",
+                r#"{"version": "1.0.0", "dependencies": {"shared": "1"}}"#,
+            ),
+            (
+                "node_modules/a",
+                r#"{"version": "1.0.0", "dependencies": {"shared": "1", "alias": "1"}}"#,
+            ),
+            ("node_modules/shared", r#"{"version": "1.0.0"}"#),
+            (
+                "node_modules/alias",
+                r#"{"link": true, "resolved": "node_modules/shared"}"#,
+            ),
+        ]);
+        assert_eq!(
+            attributions(&src, &[("", &["q", "a"])], &[]),
+            ["shared via q > shared | a > shared @ package.json:0"]
+        );
+    }
+
+    #[test]
     fn two_equally_short_chains_are_both_reported() {
         let src = v3(&[
             ("", r#"{"name": "root"}"#),

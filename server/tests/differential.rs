@@ -2,10 +2,13 @@
 //! osv-scalibr's does.
 //!
 //! The corpus records what scalibr's `semantic.Parse(...).CompareStr(...)`
-//! answered over every distinct version string in the Go, PyPI and npm advisory
+//! answered over every distinct version string in the Go, `PyPI` and npm advisory
 //! archives — 116,142 comparisons, generated once from the real data and
 //! checked in gzipped. Checking against the reference implementation's recorded
 //! output, rather than against a reading of its source, is the whole point.
+
+// Test helpers may panic: a failed setup is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use package_checker::model::Ecosystem;
 use package_checker::version::Version;

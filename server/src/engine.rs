@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-/// Matches the JetBrains plugin, and is long enough that a `git checkout`
+/// Matches the `JetBrains` plugin, and is long enough that a `git checkout`
 /// touching forty files causes one scan.
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_secs(1);
 

@@ -173,7 +173,7 @@ pub(crate) struct Served {
     pub(crate) mode: Serve,
 }
 
-/// Serves a body the way Cloud Storage does: checksum header, ETag, and a
+/// Serves a body the way Cloud Storage does: checksum header, `ETag`, and a
 /// 304 for a matching validator.
 pub(crate) struct ArchiveServer {
     pub(crate) host: String,

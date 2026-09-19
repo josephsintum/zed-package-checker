@@ -2,6 +2,9 @@
 //! divergence between the two servers shows up as a failing test rather than as
 //! a difference in a benchmark table.
 
+// Test helpers may panic: a failed setup is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use package_checker::model::*;
 use std::sync::Arc;
 
@@ -247,7 +250,7 @@ fn finding_severity_is_the_worst_advisory() {
         ],
     );
     assert_eq!(f.severity(), Severity::High);
-    assert_eq!(&*f.worst().id, "GHSA-high");
+    assert_eq!(&*f.worst().unwrap().id, "GHSA-high");
 }
 
 #[test]
@@ -256,7 +259,7 @@ fn worst_prefers_the_earlier_advisory_on_a_tie() {
         Package::new(Ecosystem::Npm, "lodash", "4.17.15"),
         vec![advisory("GHSA-first", 7.5), advisory("GHSA-second", 7.5)],
     );
-    assert_eq!(&*f.worst().id, "GHSA-first");
+    assert_eq!(&*f.worst().unwrap().id, "GHSA-first");
 }
 
 #[test]

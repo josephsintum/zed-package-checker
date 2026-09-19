@@ -35,7 +35,7 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
     if let Some(summary) = summary(path, findings, source.as_deref()) {
         out.push(summary);
     }
-    out.extend(findings.iter().map(|finding| {
+    out.extend(findings.iter().filter_map(|finding| {
         let fixable = crate::extract::version_span(&sightings, finding).is_some();
         finding_diagnostic(finding, fixable)
     }));
@@ -51,8 +51,8 @@ pub fn for_file(path: &Path, findings: &[Finding], encoding: Encoding) -> Vec<Di
     out
 }
 
-fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
-    let worst = finding.worst();
+fn finding_diagnostic(finding: &Finding, fixable: bool) -> Option<Diagnostic> {
+    let worst = finding.worst()?;
     let anchor = finding.anchor_site();
 
     let mut diagnostic = Diagnostic {
@@ -100,7 +100,7 @@ fn finding_diagnostic(finding: &Finding, fixable: bool) -> Diagnostic {
         object.insert("fixedVersion".into(), (**version).into());
     }
     diagnostic.data = Some(data);
-    diagnostic
+    Some(diagnostic)
 }
 
 /// Whether the version was resolved in a file other than the one the diagnostic
@@ -236,7 +236,9 @@ fn message_for(finding: &Finding, fixable: bool) -> String {
 /// advisories, so a toolchain finding would otherwise read "76 advisories,
 /// worst Unknown", where the only word doing any work is the number.
 fn count_and_severity(finding: &Finding) -> String {
-    let worst = finding.worst();
+    let Some(worst) = finding.worst() else {
+        return format!("{} advisories", finding.advisories.len());
+    };
     let n = finding.advisories.len();
     let rated = worst.severity() != Severity::Unknown;
     match (n, rated) {
@@ -486,7 +488,10 @@ mod tests {
         // carry the link without the sentence or the other way round.
         for f in [finding(), lockfile_resolved()] {
             let says = message_for(&f, false).contains("lockfile");
-            let links = finding_diagnostic(&f, false).related_information.is_some();
+            let links = finding_diagnostic(&f, false)
+                .expect("a finding with advisories renders")
+                .related_information
+                .is_some();
             assert_eq!(says, links, "{}", message_for(&f, false));
         }
     }
@@ -497,6 +502,7 @@ mod tests {
         // what `Option` serialised to before.
         for fix in [Fix::None, Fix::Partial] {
             let data = finding_diagnostic(&Finding { fix, ..finding() }, false)
+                .expect("a finding with advisories renders")
                 .data
                 .expect("data");
             assert!(data.get("fixedVersion").is_none(), "{data}");
@@ -509,6 +515,7 @@ mod tests {
             },
             false,
         )
+        .expect("a finding with advisories renders")
         .data
         .expect("data");
         assert_eq!(data["fixedVersion"], "4.18.0");
@@ -699,7 +706,7 @@ mod tests {
             ))),
             ..lockfile_resolved()
         };
-        let d = finding_diagnostic(&f, false);
+        let d = finding_diagnostic(&f, false).expect("a finding with advisories renders");
         assert_eq!(d.range.start.line, 4, "want the manifest line");
         let related = d.related_information.expect("a link to the lockfile");
         assert_eq!(related.len(), 1);
@@ -719,7 +726,10 @@ mod tests {
             fix: Fix::Clears("9.9.9".into()),
             ..finding()
         };
-        let data = finding_diagnostic(&fixed, true).data.unwrap();
+        let data = finding_diagnostic(&fixed, true)
+            .expect("a finding with advisories renders")
+            .data
+            .unwrap();
         assert_eq!(data["ecosystem"], "npm");
         assert_eq!(data["name"], "lodash");
         assert_eq!(data["version"], "4.17.15");
@@ -727,7 +737,10 @@ mod tests {
         assert_eq!(data["direct"], true);
         assert_eq!(data["advisories"], serde_json::json!(["GHSA-1"]));
 
-        let data = finding_diagnostic(&finding(), false).data.unwrap();
+        let data = finding_diagnostic(&finding(), false)
+            .expect("a finding with advisories renders")
+            .data
+            .unwrap();
         assert!(
             data.get("fixedVersion").is_none(),
             "omitted, not null: {data}"

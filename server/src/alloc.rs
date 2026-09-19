@@ -13,6 +13,10 @@ static LIVE: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Counting;
 
+// SAFETY: every method forwards to `System` with the layout it was given and
+// only adds a relaxed counter around it, so the allocator's contract — unique,
+// correctly aligned blocks, freed with the layout they were allocated with — is
+// exactly `System`'s.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let ptr = unsafe { System.alloc(layout) };

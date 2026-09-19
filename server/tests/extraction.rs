@@ -4,6 +4,9 @@
 //! Positions are zero-based, as LSP wants them, and columns are byte offsets —
 //! the encoding the server negotiates when the client allows it.
 
+// Test helpers may panic: a failed setup is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use package_checker::Extractor;
 mod common;
 

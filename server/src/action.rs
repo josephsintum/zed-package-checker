@@ -90,7 +90,7 @@ fn selects<'a>(params: &'a CodeActionParams, finding: &Finding) -> Option<Option
         let touches = asked.start.line <= anchor.end.line && anchor.start.line <= asked.end.line;
         return touches.then_some(None);
     }
-    let worst = finding.worst();
+    let worst = finding.worst()?;
     ours.into_iter()
         .find(|d| matches!(&d.code, Some(NumberOrString::String(id)) if *id == *worst.id))
         .map(Some)

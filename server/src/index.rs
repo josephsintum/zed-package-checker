@@ -27,6 +27,10 @@ impl Index {
     ///
     /// Takes ownership of the whole set at once rather than accumulating, so
     /// the posting lists can be laid out contiguously in one pass.
+    #[expect(
+        clippy::expect_used,
+        reason = "the counting pass inserts every key the placing pass looks up; two passes are what keep the posting lists contiguous"
+    )]
     pub(crate) fn build(
         advisories: Vec<Advisory>,
         ecosystems: Vec<Ecosystem>,

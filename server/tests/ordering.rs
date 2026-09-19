@@ -1,6 +1,9 @@
 //! The quirks worth naming, so a future simplification of the comparator has to
 //! argue with a test rather than with a 116k-row corpus.
 
+// Test helpers may panic: a failed setup is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use package_checker::model::Ecosystem::{Go, Npm, PyPI};
 use package_checker::version::Version;
 use std::cmp::Ordering::{Equal, Greater, Less};

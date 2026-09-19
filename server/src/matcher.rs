@@ -384,7 +384,7 @@ mod tests {
         assert!(findings[0].malicious());
         assert_eq!(findings[0].severity(), Severity::Critical);
         // Ties on Critical fall back to the id, so the MAL- entry sorts second.
-        assert_eq!(&*findings[0].worst().id, "GHSA-crit");
+        assert_eq!(&*findings[0].worst().unwrap().id, "GHSA-crit");
     }
 
     #[test]

@@ -158,7 +158,7 @@ fn load_parallel(
         path: path.into(),
         source,
     })?;
-    // Safety: the archive is published by an atomic rename and never written in
+    // SAFETY: the archive is published by an atomic rename and never written in
     // place, so the mapping cannot be truncated underneath us. A concurrent
     // refresh creates a new file and renames over the name, leaving this
     // mapping pointing at the old inode.

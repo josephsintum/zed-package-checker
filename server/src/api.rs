@@ -538,8 +538,8 @@ mod tests {
         }
     }
 
-    fn config(json: serde_json::Value) -> Config {
-        Config::from_options(Some(&json))
+    fn config(json: &serde_json::Value) -> Config {
+        Config::from_options(Some(json))
     }
 
     #[test]
@@ -569,7 +569,7 @@ mod tests {
             extracted(Ecosystem::Npm, "lodash", "4.17.15"),
             extracted(Ecosystem::Go, "github.com/acme/tool", "1.0.0"),
         ];
-        let config = config(serde_json::json!({
+        let config = config(&serde_json::json!({
             "online": { "exclude": ["@acme/", "Go:github.com/acme/"] }
         }));
 

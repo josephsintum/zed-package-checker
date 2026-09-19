@@ -56,3 +56,21 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "abort"
+
+[lints.rust]
+missing_docs = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+large_enum_variant = "warn"
+needless_pass_by_value = "warn"
+redundant_clone = "warn"
+doc_markdown = "warn"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

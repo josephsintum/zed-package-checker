@@ -161,7 +161,7 @@ impl WorkspaceScanner {
     /// `ready` reports only that an archive exists. Without this, once one was
     /// on disk the server never consulted its freshness window again, and an
     /// editor left open for a week matched against week-old advisories. The
-    /// work is a cold start's — check staleness, revalidate with the ETag,
+    /// work is a cold start's — check staleness, revalidate with the `ETag`,
     /// download only when the bytes changed — so it reuses the same background
     /// path, which already runs one at a time and stops on shutdown.
     fn refresh_if_due(&self, ecosystems: Vec<Ecosystem>) {

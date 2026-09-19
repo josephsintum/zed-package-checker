@@ -25,7 +25,7 @@ const VENDOR_DIR: &str = "osv-scalibr";
 /// Advisories are published continuously, but a day-old database is a
 /// reasonable trade against waking the network on every editor start.
 /// Smallest archive first, so the quick wins land while npm is still streaming.
-/// Sizes as published: crates.io 3 MB, Go 11 MB, PyPI 32 MB, npm 205 MB.
+/// Sizes as published: crates.io 3 MB, Go 11 MB, `PyPI` 32 MB, npm 205 MB.
 const ARCHIVE_ORDER: [Ecosystem; 4] = [
     Ecosystem::CratesIo,
     Ecosystem::Go,
@@ -495,6 +495,10 @@ impl Database {
         serde_json::from_slice(&bytes).ok()
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "Meta is plain data with no map keys; serialisation cannot fail"
+    )]
     fn write_meta(&self, ecosystem: Ecosystem, meta: &Meta) -> Result<(), DbError> {
         let path = self.meta_path(ecosystem);
         let encoded = serde_json::to_vec(meta).expect("meta is plain data");

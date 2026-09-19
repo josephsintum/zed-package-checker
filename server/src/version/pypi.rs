@@ -5,6 +5,10 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 /// PEP 440, Appendix B. Copied from the specification, as osv-scalibr does.
+#[expect(
+    clippy::expect_used,
+    reason = "the pattern is a constant; a typo fails the first test that touches it"
+)]
 static PEP440: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"^\s*v?(?:(?:(?P<epoch>[0-9]+)!)?(?P<release>[0-9]+(?:\.[0-9]+)*)(?P<pre>[-_\.]?(?P<pre_l>(a|b|c|rc|alpha|beta|pre|preview))[-_\.]?(?P<pre_n>[0-9]+)?)?(?P<post>(?:-(?P<post_n1>[0-9]+))|(?:[-_\.]?(?P<post_l>post|rev|r)[-_\.]?(?P<post_n2>[0-9]+)?))?(?P<dev>[-_\.]?(?P<dev_l>dev)[-_\.]?(?P<dev_n>[0-9]+)?)?)(?:\+(?P<local>[a-z0-9]+(?:[-_\.][a-z0-9]+)*))?\s*$",
@@ -12,9 +16,17 @@ static PEP440: LazyLock<Regex> = LazyLock::new(|| {
     .expect("the PEP 440 pattern is a compile-time constant")
 });
 
+#[expect(
+    clippy::expect_used,
+    reason = "the pattern is a constant; a typo fails the first test that touches it"
+)]
 static LOCAL_SPLIT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[._-]").expect("constant pattern"));
 
+#[expect(
+    clippy::expect_used,
+    reason = "the pattern is a constant; a typo fails the first test that touches it"
+)]
 static LEGACY_PARTS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\d+|[a-z]+|\.|-").expect("constant pattern"));
 
@@ -26,10 +38,10 @@ struct LetterAndNumber {
     number: Option<String>,
 }
 
-/// A PyPI version.
+/// A `PyPI` version.
 ///
 /// A port of osv-scalibr's `PyPIVersion`, not of PEP 440. The difference
-/// matters: `pep440_rs` rejects 3,185 of the version strings the PyPI advisory
+/// matters: `pep440_rs` rejects 3,185 of the version strings the `PyPI` advisory
 /// archive actually contains — setuptools-era spellings like `0.3m1`,
 /// `0.1-charmander` and `0.1.0.dev-120828c` — and scalibr accepts every one of
 /// them through a legacy fallback. Using a strict PEP 440 crate would silently

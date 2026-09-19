@@ -7,6 +7,9 @@
 //! and a domain type that drags in the protocol or the network is one the
 //! others cannot use without them.
 
+// Test helpers may panic: a failed setup is a failed test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::path::Path;
 
 /// `use` lines `model.rs` is allowed to have: `std`, and itself.

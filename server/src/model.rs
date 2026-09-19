@@ -238,7 +238,7 @@ impl Site {
 ///
 /// Two separate sites because they can genuinely live in different files — a
 /// range in `package.json`, the resolved version in `package-lock.json`.
-/// Conflating them is the bug JetBrains shipped.
+/// Conflating them is the bug `JetBrains` shipped.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Anchor {
     pub declaration: Site,
@@ -254,7 +254,7 @@ impl Anchor {
     }
 }
 
-/// Marks advisories from the OpenSSF malicious-packages feed.
+/// Marks advisories from the `OpenSSF` malicious-packages feed.
 const MALICIOUS_ID_PREFIX: &str = "MAL-";
 
 /// Qualitative severity, ascending.
@@ -504,24 +504,21 @@ impl Finding {
             .unwrap_or(Severity::Unknown)
     }
 
-    /// The highest-severity advisory. Ties keep the earlier one, which is
-    /// already sorted, so output stays stable between runs.
+    /// The highest-severity advisory, or `None` for a finding built with no
+    /// advisories — which the matcher never produces. Ties keep the earlier
+    /// one, which is already sorted, so output stays stable between runs.
     ///
     /// Not `max_by_key`: it returns the *last* maximum, which would make the
     /// reported advisory depend on the order two equally-scored entries came
     /// out of the archive.
-    pub fn worst(&self) -> &Advisory {
-        self.advisories
-            .iter()
-            .map(Arc::as_ref)
-            .reduce(|best, a| {
-                if a.severity() > best.severity() {
-                    a
-                } else {
-                    best
-                }
-            })
-            .expect("a finding always carries at least one advisory")
+    pub fn worst(&self) -> Option<&Advisory> {
+        self.advisories.iter().map(Arc::as_ref).reduce(|best, a| {
+            if a.severity() > best.severity() {
+                a
+            } else {
+                best
+            }
+        })
     }
 
     pub fn shortest_path(&self) -> Option<&[PackageKey]> {

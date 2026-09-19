@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "zed_package_checker"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde_json",
  "sha2",

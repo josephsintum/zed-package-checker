@@ -6,8 +6,9 @@
 //! it to notice, so nothing in the scan path polls for cancellation.
 
 use crate::model::{Finding, Report};
+use crate::scan::{ScanError, Scanner};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -37,14 +38,6 @@ impl Reason {
             Reason::Manual => "requested",
         }
     }
-}
-
-/// Produces a report for a workspace. Implemented by `crate::scan`.
-pub trait Scanner: Send + Sync + 'static {
-    fn scan(&self, root: &Path) -> anyhow::Result<Report>;
-
-    /// Stops background work. Called once, when the engine shuts down.
-    fn shutdown(&self) {}
 }
 
 /// Sends diagnostics to the client. Implemented by the LSP layer.
@@ -183,7 +176,7 @@ async fn run(
     let mut report: HashMap<PathBuf, Vec<Finding>> = HashMap::new();
     let mut published: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<tokio::time::Instant> = None;
-    let mut in_flight: Option<JoinHandle<anyhow::Result<Report>>> = None;
+    let mut in_flight: Option<JoinHandle<Result<Report, ScanError>>> = None;
     // One notice per condition rather than one per debounce.
     let mut announced = false;
     let mut pending = false;
@@ -325,6 +318,7 @@ fn publish(
 mod tests {
     use super::*;
     use crate::model::{Ecosystem, Fix, Package, Range, Site};
+    use std::path::Path;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -365,13 +359,13 @@ mod tests {
     }
 
     impl Scanner for Arc<FakeScanner> {
-        fn scan(&self, root: &Path) -> anyhow::Result<Report> {
+        fn scan(&self, root: &Path) -> Result<Report, ScanError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if let Some(gate) = self.block.lock().unwrap().take() {
                 let _ = gate.recv();
             }
             if self.failing.load(Ordering::SeqCst) {
-                anyhow::bail!("database unavailable");
+                return Err(ScanError::NotReady);
             }
             Ok(Report::new(root, self.findings.lock().unwrap().clone()))
         }

@@ -23,7 +23,6 @@ path = "src/main.rs"
 count-alloc = []
 
 [dependencies]
-anyhow = "1"
 arc-swap = "1"
 crc32c = "0.6"
 cvss = "2.2"

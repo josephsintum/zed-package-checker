@@ -71,7 +71,7 @@ fn watched_globs() -> Vec<FileSystemWatcher> {
 /// Builds the scanner once the root is known, handed the live configuration so
 /// a `didChangeConfiguration` reaches it without rebuilding anything.
 type BuildScanner =
-    dyn Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::engine::Scanner> + Send + Sync;
+    dyn Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::scan::Scanner> + Send + Sync;
 
 /// Sends diagnostics to the client from whatever task produced them.
 struct ClientPublisher {
@@ -139,7 +139,7 @@ impl Backend {
     pub fn new(
         client: Client,
         version: String,
-        build: impl Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::engine::Scanner>
+        build: impl Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::scan::Scanner>
         + Send
         + Sync
         + 'static,
@@ -607,8 +607,11 @@ mod tests {
     /// counts how often it was asked.
     struct OneFinding(std::sync::atomic::AtomicUsize);
 
-    impl crate::engine::Scanner for Arc<OneFinding> {
-        fn scan(&self, root: &Path) -> anyhow::Result<crate::model::Report> {
+    impl crate::scan::Scanner for Arc<OneFinding> {
+        fn scan(
+            &self,
+            root: &Path,
+        ) -> std::result::Result<crate::model::Report, crate::scan::ScanError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             let finding = Finding {
                 package: crate::model::Package::new(
@@ -652,7 +655,7 @@ mod tests {
         let for_build = Arc::clone(&scanner);
         let (mut service, client) = crate::testing::FakeClient::serve(|client| {
             Backend::new(client, "test".into(), move |_, _, _| {
-                Arc::new(Arc::clone(&for_build)) as Arc<dyn crate::engine::Scanner>
+                Arc::new(Arc::clone(&for_build)) as Arc<dyn crate::scan::Scanner>
             })
         });
         let params = InitializeParams {

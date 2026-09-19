@@ -189,8 +189,11 @@ mod tests {
     /// Scans nothing: these tests are about the wire, not the workspace.
     struct Idle;
 
-    impl crate::engine::Scanner for Idle {
-        fn scan(&self, root: &std::path::Path) -> anyhow::Result<crate::model::Report> {
+    impl crate::scan::Scanner for Idle {
+        fn scan(
+            &self,
+            root: &std::path::Path,
+        ) -> Result<crate::model::Report, crate::scan::ScanError> {
             Ok(crate::model::Report::new(root, Vec::new()))
         }
     }

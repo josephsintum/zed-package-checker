@@ -4,7 +4,6 @@
 //! lock at all and a refresh is a pointer swap.
 
 use crate::db::{Database, DbError};
-use crate::engine::Scanner;
 use crate::extract::Extractor;
 use crate::index::Index;
 use crate::load::{Strategy, load};
@@ -42,6 +41,24 @@ pub enum ScanError {
     Db(#[from] DbError),
     #[error(transparent)]
     Api(#[from] crate::api::ApiError),
+}
+
+/// Produces a report for a workspace.
+///
+/// A trait rather than the concrete [`WorkspaceScanner`] so the engine can be
+/// tested against a fake; there is one real implementation.
+pub trait Scanner: Send + Sync + 'static {
+    /// Scans `root` and reports every vulnerable dependency under it.
+    ///
+    /// # Errors
+    ///
+    /// [`ScanError::NotReady`] while the advisory database is still
+    /// downloading; the other variants wrap extraction, loading, cache and
+    /// API failures.
+    fn scan(&self, root: &Path) -> Result<Report, ScanError>;
+
+    /// Stops background work. Called once, when the engine shuts down.
+    fn shutdown(&self) {}
 }
 
 pub struct WorkspaceScanner {
@@ -267,7 +284,7 @@ impl Scanner for WorkspaceScanner {
         WorkspaceScanner::shutdown(self);
     }
 
-    fn scan(&self, root: &Path) -> anyhow::Result<Report> {
+    fn scan(&self, root: &Path) -> Result<Report, ScanError> {
         let packages = self.extractor.extract(root)?;
         if packages.is_empty() {
             // Nothing to look up, so no database is needed and no download is
@@ -325,7 +342,7 @@ impl Scanner for WorkspaceScanner {
         if !config.offline {
             self.warm(ecosystems);
         }
-        Err(ScanError::NotReady.into())
+        Err(ScanError::NotReady)
     }
 }
 
@@ -388,7 +405,7 @@ mod tests {
             self.rescans.load(Ordering::SeqCst)
         }
 
-        fn scan(&self, root: &Path) -> anyhow::Result<Report> {
+        fn scan(&self, root: &Path) -> Result<Report, ScanError> {
             self.scanner.scan(root)
         }
 
@@ -404,14 +421,8 @@ mod tests {
         }
     }
 
-    fn is_not_ready(result: &anyhow::Result<Report>) -> bool {
-        matches!(
-            result
-                .as_ref()
-                .err()
-                .and_then(|e| e.downcast_ref::<ScanError>()),
-            Some(ScanError::NotReady)
-        )
+    fn is_not_ready(result: &Result<Report, ScanError>) -> bool {
+        matches!(result, Err(ScanError::NotReady))
     }
 
     fn wait_for(condition: impl Fn() -> bool) -> bool {

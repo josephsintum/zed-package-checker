@@ -5,14 +5,11 @@
 //! the encoding the server negotiates when the client allows it.
 
 use package_checker::Extractor;
-use package_checker::model::{Ecosystem, ExtractedPackage};
-use std::path::{Path, PathBuf};
+mod common;
 
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("testdata/fixtures")
-        .join(name)
-}
+use common::fixture;
+use package_checker::model::{Ecosystem, ExtractedPackage};
+use std::path::Path;
 
 /// One extracted package, flattened to what a reader can check by eye:
 /// `ecosystem:name@version file line start-end [flags]`.

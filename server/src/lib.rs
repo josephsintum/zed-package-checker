@@ -4,6 +4,19 @@
 //! every dependency it finds against the OSV database — a local archive, or
 //! per-package answers from osv.dev kept on disk — and publishes the findings
 //! as diagnostics anchored on the manifest line the user can act on.
+//!
+//! # Layout
+//!
+//! Modules depend downward through this list and never upward:
+//!
+//! - `model` — domain types, `std` only
+//! - `span`, `read` — positions, and bounded file reads
+//! - `version` — per-ecosystem version ordering
+//! - `manifest`, `extract` — the parsers, with spans, and the walk that runs them
+//! - `osv`, `index`, `load`, `db`, `api` — advisories: decoding, indexing, the cache, the network
+//! - `matcher`, `scan` — which advisories apply, composed into one scan
+//! - `engine` — when to scan, and what to publish
+//! - `config`, `diagnostics`, `action`, `progress`, `lsp` — the protocol surface
 
 mod action;
 mod api;

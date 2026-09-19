@@ -27,6 +27,7 @@ const REFRESH_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
+/// Why a scan produced no report.
 pub enum ScanError {
     /// The archives are still downloading. Deliberately distinct from an empty
     /// report: "still downloading" and "nothing is vulnerable" must never look
@@ -34,12 +35,16 @@ pub enum ScanError {
     #[error("advisory database not ready")]
     NotReady,
     #[error(transparent)]
+    /// The workspace could not be walked.
     Extract(#[from] crate::extract::ExtractError),
     #[error(transparent)]
+    /// An archive could not be loaded.
     Load(#[from] crate::load::LoadError),
     #[error(transparent)]
+    /// The advisory cache failed.
     Db(#[from] DbError),
     #[error(transparent)]
+    /// osv.dev could not be asked.
     Api(#[from] crate::api::ApiError),
 }
 
@@ -61,6 +66,7 @@ pub trait Scanner: Send + Sync + 'static {
     fn shutdown(&self) {}
 }
 
+/// The scanner the server runs: extraction, database and matching, composed.
 pub struct WorkspaceScanner {
     extractor: Extractor,
     api: crate::api::ApiSource,
@@ -84,6 +90,8 @@ pub struct WorkspaceScanner {
 }
 
 impl WorkspaceScanner {
+    /// A scanner over `database`, calling `on_ready` whenever a background
+    /// download makes a rescan worthwhile.
     pub fn new(
         extractor: Extractor,
         database: Arc<Database>,
@@ -436,165 +444,177 @@ mod tests {
         condition()
     }
 
-    #[test]
-    fn a_workspace_without_dependencies_touches_no_database() {
-        // The server attaches to nearly every language, so most workspaces it
-        // starts in have nothing to scan. Those must not trigger a 205 MB
-        // download.
-        let h = Harness::new(Duration::from_secs(3600));
-        let root = tempfile::tempdir().unwrap();
+    mod database {
+        use super::*;
 
-        let report = h.scan(root.path()).unwrap();
-        assert!(report.findings.is_empty());
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.server.requests(), 0, "a download was started");
-    }
+        #[test]
+        fn a_workspace_without_dependencies_touches_no_database() {
+            // The server attaches to nearly every language, so most workspaces it
+            // starts in have nothing to scan. Those must not trigger a 205 MB
+            // download.
+            let h = Harness::new(Duration::from_secs(3600));
+            let root = tempfile::tempdir().unwrap();
 
-    #[test]
-    fn a_missing_database_reports_not_ready_rather_than_clean() {
-        // "Still downloading" and "nothing is vulnerable" must never look
-        // alike: the second is the one a user acts on.
-        let h = Harness::new(Duration::from_secs(3600));
-        h.scanner.config.store(Arc::new(crate::config::Config {
-            offline: true,
-            ..Default::default()
-        }));
-        let root = project_with_lodash();
+            let report = h.scan(root.path()).unwrap();
+            assert!(report.findings.is_empty());
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(h.server.requests(), 0, "a download was started");
+        }
 
-        let result = h.scan(root.path());
-        assert!(is_not_ready(&result), "{result:?}");
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.server.requests(), 0, "offline must not download");
-    }
+        #[test]
+        fn a_missing_database_reports_not_ready_rather_than_clean() {
+            // "Still downloading" and "nothing is vulnerable" must never look
+            // alike: the second is the one a user acts on.
+            let h = Harness::new(Duration::from_secs(3600));
+            h.scanner.config.store(Arc::new(crate::config::Config {
+                offline: true,
+                ..Default::default()
+            }));
+            let root = project_with_lodash();
 
-    #[test]
-    fn repeated_scans_start_only_one_download() {
-        // A project with a missing database fails every scan it is asked for,
-        // and each failure must not start its own download.
-        let h = Harness::new(Duration::from_secs(3600));
-        h.server.set(|s| s.delay = Duration::from_millis(300));
-        let root = project_with_lodash();
-
-        for _ in 0..5 {
             let result = h.scan(root.path());
             assert!(is_not_ready(&result), "{result:?}");
-        }
-        assert!(wait_for(|| h.rescans() >= 1));
-        assert_eq!(h.server.requests(), 1, "want exactly one download");
-    }
-
-    #[test]
-    fn a_finished_download_asks_for_a_rescan_that_then_finds_the_advisory() {
-        let h = Harness::new(Duration::from_secs(3600));
-        let root = project_with_lodash();
-
-        let report = h.scan_until_ready(root.path());
-        assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
-        assert_eq!(report.findings[0].package.name(), "lodash");
-    }
-
-    #[test]
-    fn a_finished_download_asks_for_exactly_one_rescan() {
-        let h = Harness::new(Duration::from_secs(3600));
-        let root = project_with_lodash();
-
-        h.scan_until_ready(root.path());
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.rescans(), 1, "one archive landed, one rescan");
-    }
-
-    #[test]
-    fn a_ready_database_is_still_revalidated() {
-        // Ready only reports that an archive exists. Before this, a server
-        // whose archive was already on disk never reached the database's
-        // freshness check again — an editor open for a week matched against
-        // week-old advisories.
-        let h = Harness::new(Duration::ZERO);
-        let root = project_with_lodash();
-        h.scan_until_ready(root.path());
-
-        assert!(
-            wait_for(|| h.server.not_modified() == 1),
-            "a scan against a ready database never asked it to revalidate: {} requests",
-            h.server.requests()
-        );
-    }
-
-    #[test]
-    fn revalidation_is_rate_limited() {
-        // Revalidating on every keystroke-triggered rescan would put a network
-        // round trip behind every scan for no benefit.
-        let h = Harness::new(Duration::ZERO);
-        let root = project_with_lodash();
-        h.scan_until_ready(root.path());
-        for _ in 0..5 {
-            h.scan(root.path()).unwrap();
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(h.server.requests(), 0, "offline must not download");
         }
 
-        assert!(wait_for(|| h.server.not_modified() == 1));
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            h.server.requests(),
-            2,
-            "revalidated more than once across six scans"
-        );
+        #[test]
+        fn repeated_scans_start_only_one_download() {
+            // A project with a missing database fails every scan it is asked for,
+            // and each failure must not start its own download.
+            let h = Harness::new(Duration::from_secs(3600));
+            h.server.set(|s| s.delay = Duration::from_millis(300));
+            let root = project_with_lodash();
+
+            for _ in 0..5 {
+                let result = h.scan(root.path());
+                assert!(is_not_ready(&result), "{result:?}");
+            }
+            assert!(wait_for(|| h.rescans() >= 1));
+            assert_eq!(h.server.requests(), 1, "want exactly one download");
+        }
+
+        #[test]
+        fn a_finished_download_asks_for_a_rescan_that_then_finds_the_advisory() {
+            let h = Harness::new(Duration::from_secs(3600));
+            let root = project_with_lodash();
+
+            let report = h.scan_until_ready(root.path());
+            assert_eq!(report.findings.len(), 1, "{:?}", report.findings);
+            assert_eq!(report.findings[0].package.name(), "lodash");
+        }
+
+        #[test]
+        fn a_finished_download_asks_for_exactly_one_rescan() {
+            let h = Harness::new(Duration::from_secs(3600));
+            let root = project_with_lodash();
+
+            h.scan_until_ready(root.path());
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(h.rescans(), 1, "one archive landed, one rescan");
+        }
     }
 
-    #[test]
-    fn a_revalidation_that_changes_nothing_does_not_ask_for_a_rescan() {
-        // A 304 leaves the archive as it was; reloading npm's index and
-        // republishing identical diagnostics every hour would be pure cost.
-        let h = Harness::new(Duration::ZERO);
-        let root = project_with_lodash();
-        h.scan_until_ready(root.path());
-        assert!(wait_for(|| h.server.not_modified() == 1));
+    mod revalidation {
+        use super::*;
 
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.rescans(), 1, "an unchanged archive asked for a rescan");
-        assert!(
-            h.scanner.index.load().is_some(),
-            "an unchanged archive dropped the index"
-        );
+        #[test]
+        fn a_ready_database_is_still_revalidated() {
+            // Ready only reports that an archive exists. Before this, a server
+            // whose archive was already on disk never reached the database's
+            // freshness check again — an editor open for a week matched against
+            // week-old advisories.
+            let h = Harness::new(Duration::ZERO);
+            let root = project_with_lodash();
+            h.scan_until_ready(root.path());
+
+            assert!(
+                wait_for(|| h.server.not_modified() == 1),
+                "a scan against a ready database never asked it to revalidate: {} requests",
+                h.server.requests()
+            );
+        }
+
+        #[test]
+        fn revalidation_is_rate_limited() {
+            // Revalidating on every keystroke-triggered rescan would put a network
+            // round trip behind every scan for no benefit.
+            let h = Harness::new(Duration::ZERO);
+            let root = project_with_lodash();
+            h.scan_until_ready(root.path());
+            for _ in 0..5 {
+                h.scan(root.path()).unwrap();
+            }
+
+            assert!(wait_for(|| h.server.not_modified() == 1));
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(
+                h.server.requests(),
+                2,
+                "revalidated more than once across six scans"
+            );
+        }
+
+        #[test]
+        fn a_revalidation_that_changes_nothing_does_not_ask_for_a_rescan() {
+            // A 304 leaves the archive as it was; reloading npm's index and
+            // republishing identical diagnostics every hour would be pure cost.
+            let h = Harness::new(Duration::ZERO);
+            let root = project_with_lodash();
+            h.scan_until_ready(root.path());
+            assert!(wait_for(|| h.server.not_modified() == 1));
+
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(h.rescans(), 1, "an unchanged archive asked for a rescan");
+            assert!(
+                h.scanner.index.load().is_some(),
+                "an unchanged archive dropped the index"
+            );
+        }
     }
 
-    #[test]
-    fn shutdown_returns_while_a_download_is_in_flight() {
-        // Without this the server's exit waits out the whole download.
-        let h = Harness::new(Duration::from_secs(3600));
-        h.server.set(|s| s.delay = Duration::from_secs(3));
-        let root = project_with_lodash();
-        assert!(is_not_ready(&h.scan(root.path())));
-        assert!(
-            wait_for(|| h.server.requests() == 1),
-            "the download never started"
-        );
+    mod shutdown {
+        use super::*;
 
-        let started = Instant::now();
-        h.scanner.shutdown();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "shutdown waited {:?} for the download",
-            started.elapsed()
-        );
-    }
+        #[test]
+        fn shutdown_returns_while_a_download_is_in_flight() {
+            // Without this the server's exit waits out the whole download.
+            let h = Harness::new(Duration::from_secs(3600));
+            h.server.set(|s| s.delay = Duration::from_secs(3));
+            let root = project_with_lodash();
+            assert!(is_not_ready(&h.scan(root.path())));
+            assert!(
+                wait_for(|| h.server.requests() == 1),
+                "the download never started"
+            );
 
-    #[test]
-    fn shutdown_is_idempotent_and_safe_without_a_download() {
-        let h = Harness::new(Duration::from_secs(3600));
-        h.scanner.shutdown();
-        h.scanner.shutdown();
-    }
+            let started = Instant::now();
+            h.scanner.shutdown();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "shutdown waited {:?} for the download",
+                started.elapsed()
+            );
+        }
 
-    #[test]
-    fn nothing_is_requested_after_shutdown() {
-        let h = Harness::new(Duration::from_secs(3600));
-        let root = project_with_lodash();
-        h.scanner.shutdown();
+        #[test]
+        fn shutdown_is_idempotent_and_safe_without_a_download() {
+            let h = Harness::new(Duration::from_secs(3600));
+            h.scanner.shutdown();
+            h.scanner.shutdown();
+        }
 
-        let result = h.scan(root.path());
-        assert!(is_not_ready(&result), "{result:?}");
-        std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.server.requests(), 0, "a download started after shutdown");
-        assert_eq!(h.rescans(), 0);
+        #[test]
+        fn nothing_is_requested_after_shutdown() {
+            let h = Harness::new(Duration::from_secs(3600));
+            let root = project_with_lodash();
+            h.scanner.shutdown();
+
+            let result = h.scan(root.path());
+            assert!(is_not_ready(&result), "{result:?}");
+            std::thread::sleep(Duration::from_millis(100));
+            assert_eq!(h.server.requests(), 0, "a download started after shutdown");
+            assert_eq!(h.rescans(), 0);
+        }
     }
 }

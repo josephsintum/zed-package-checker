@@ -20,9 +20,13 @@ use std::time::SystemTime;
 /// handle crates.io?" from a code review question into a compile error.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Ecosystem {
+    /// npm.
     Npm,
+    /// Go modules.
     Go,
+    /// `PyPI`.
     PyPI,
+    /// crates.io.
     CratesIo,
 }
 
@@ -107,11 +111,14 @@ pub const GO_TOOLCHAIN: &str = "stdlib";
 /// of megabytes held for the life of the editor session.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PackageKey {
+    /// The registry the name is meaningful in.
     pub ecosystem: Ecosystem,
+    /// The package name, as the ecosystem writes it.
     pub name: Box<str>,
 }
 
 impl PackageKey {
+    /// A key for `name` in `ecosystem`.
     pub fn new(ecosystem: Ecosystem, name: impl Into<Box<str>>) -> Self {
         PackageKey {
             ecosystem,
@@ -119,6 +126,7 @@ impl PackageKey {
         }
     }
 
+    /// Whether this is the Go toolchain itself rather than a module.
     pub fn is_go_toolchain(&self) -> bool {
         self.ecosystem == Ecosystem::Go && &*self.name == GO_TOOLCHAIN
     }
@@ -133,11 +141,14 @@ impl fmt::Display for PackageKey {
 /// A package at a specific version.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Package {
+    /// Ecosystem and name.
     pub key: PackageKey,
+    /// The version, as written or as resolved.
     pub version: Box<str>,
 }
 
 impl Package {
+    /// A package at a version.
     pub fn new(
         ecosystem: Ecosystem,
         name: impl Into<Box<str>>,
@@ -149,10 +160,12 @@ impl Package {
         }
     }
 
+    /// The package's ecosystem.
     pub fn ecosystem(&self) -> Ecosystem {
         self.key.ecosystem
     }
 
+    /// The package's name.
     pub fn name(&self) -> &str {
         &self.key.name
     }
@@ -170,11 +183,14 @@ impl fmt::Display for Package {
 /// client accepted utf-8, which is what the extractors produce natively.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct Position {
+    /// One-based line.
     pub line: u32,
+    /// Zero-based column, in the unit the encoding decides.
     pub column: u32,
 }
 
 impl Position {
+    /// A position at `line` and `column`.
     pub const fn new(line: u32, column: u32) -> Self {
         Position { line, column }
     }
@@ -191,11 +207,14 @@ impl Position {
 /// A half-open span: `start` is included, `end` is not.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct Range {
+    /// Inclusive start.
     pub start: Position,
+    /// Exclusive end.
     pub end: Position,
 }
 
 impl Range {
+    /// A half-open range.
     pub const fn new(start: Position, end: Position) -> Self {
         Range { start, end }
     }
@@ -221,11 +240,14 @@ impl Range {
 /// A range in a named file. The path is always absolute.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Site {
+    /// The file.
     pub path: PathBuf,
+    /// Where within it.
     pub range: Range,
 }
 
 impl Site {
+    /// A site in `path`.
     pub fn new(path: impl Into<PathBuf>, range: Range) -> Self {
         Site {
             path: path.into(),
@@ -241,11 +263,14 @@ impl Site {
 /// Conflating them is the bug `JetBrains` shipped.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Anchor {
+    /// Where the dependency is named.
     pub declaration: Site,
+    /// Where its version is written, when it is written textually.
     pub version: Option<Site>,
 }
 
 impl Anchor {
+    /// An anchor with no separately located version.
     pub fn new(declaration: Site) -> Self {
         Anchor {
             declaration,
@@ -265,10 +290,15 @@ const MALICIOUS_ID_PREFIX: &str = "MAL-";
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub enum Severity {
     #[default]
+    /// No score.
     Unknown,
+    /// CVSS below 4.0.
     Low,
+    /// CVSS 4.0 to 6.9.
     Medium,
+    /// CVSS 7.0 to 8.9.
     High,
+    /// CVSS 9.0 and above.
     Critical,
 }
 
@@ -291,6 +321,7 @@ impl Severity {
         }
     }
 
+    /// The band's name, capitalised.
     pub const fn as_str(self) -> &'static str {
         match self {
             Severity::Unknown => "Unknown",
@@ -325,6 +356,7 @@ pub struct AffectedRange {
 /// One package an advisory affects, with the versions it affects.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Affected {
+    /// The affected package.
     pub package: PackageKey,
     /// Version intervals. Empty when `versions` enumerates instead.
     pub ranges: Box<[AffectedRange]>,
@@ -347,11 +379,15 @@ pub struct Advisory {
     /// Other identifiers, typically CVEs. EPSS and KEV are CVE-keyed, so
     /// enrichment looks up through these.
     pub aliases: Box<[Box<str>]>,
+    /// One line, for the diagnostic message.
     pub summary: Box<str>,
     /// The base score, zero when the advisory carries none.
     pub cvss_score: f64,
+    /// The vector the score was computed from; empty when there is none.
     pub cvss_vector: Box<str>,
+    /// Every package and version range the advisory covers.
     pub affected: Box<[Affected]>,
+    /// Reference URLs, in the order the advisory lists them.
     pub references: Box<[Box<str>]>,
 }
 
@@ -381,6 +417,7 @@ impl Advisory {
         }
     }
 
+    /// The advisory's page on osv.dev.
     pub fn url(&self) -> String {
         format!("https://osv.dev/vulnerability/{}", self.id)
     }
@@ -413,11 +450,13 @@ pub const DEV_GROUP: &str = "dev";
 /// A dependency an extractor found, before any advisory has been consulted.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExtractedPackage {
+    /// What was found.
     pub package: Package,
     /// Where the package was actually found — a lockfile line, usually.
     pub evidence: Site,
     /// Where the user can act on it, when that is a different file.
     pub declared: Option<Site>,
+    /// Dependency groups it belongs to, such as [`DEV_GROUP`]; empty means it ships.
     pub dep_groups: Vec<String>,
     /// The version came from resolving a range, not from reading a pin, so the
     /// installed version may differ.
@@ -452,15 +491,21 @@ pub fn ecosystems_of(packages: &[ExtractedPackage]) -> Vec<Ecosystem> {
 /// Advisories are shared rather than copied: one `Arc` bump per finding.
 #[derive(Clone, Debug)]
 pub struct Finding {
+    /// The vulnerable package.
     pub package: Package,
+    /// Every advisory that applies, sorted by severity.
     pub advisories: Vec<Arc<Advisory>>,
+    /// Where the package was actually found — a lockfile line, usually.
     pub evidence: Site,
+    /// Where the user can act on it, when that is a different file.
     pub declared: Option<Anchor>,
     /// root -> ... -> package. Empty means the dependency is direct.
     pub paths: Vec<Vec<PackageKey>>,
     /// `None` means no reachability analysis ran.
     pub reachable: Option<bool>,
+    /// The version came from resolving a range, not from reading a pin.
     pub from_range: bool,
+    /// Dependency groups, such as [`DEV_GROUP`]; empty means it ships.
     pub dep_groups: Vec<String>,
     /// Decided by the matcher, where the index is borrowed. Nothing downstream
     /// of it holds one.
@@ -484,18 +529,22 @@ pub enum Fix {
 }
 
 impl Finding {
+    /// Whether the project depends on the package directly.
     pub fn direct(&self) -> bool {
         self.paths.is_empty()
     }
 
+    /// Whether every group the package belongs to is development-only.
     pub fn dev(&self) -> bool {
         self.dep_groups.iter().any(|g| g == DEV_GROUP)
     }
 
+    /// Whether any applicable advisory reports the package as malicious.
     pub fn malicious(&self) -> bool {
         self.advisories.iter().any(|a| a.malicious())
     }
 
+    /// The severity of the worst applicable advisory.
     pub fn severity(&self) -> Severity {
         self.advisories
             .iter()
@@ -521,6 +570,7 @@ impl Finding {
         })
     }
 
+    /// The fewest hops from a direct dependency to this package.
     pub fn shortest_path(&self) -> Option<&[PackageKey]> {
         self.paths.iter().min_by_key(|p| p.len()).map(Vec::as_slice)
     }
@@ -538,8 +588,11 @@ impl Finding {
 /// Everything one scan of one workspace found.
 #[derive(Clone, Debug)]
 pub struct Report {
+    /// The workspace that was scanned.
     pub root: PathBuf,
+    /// Every vulnerable dependency found.
     pub findings: Vec<Finding>,
+    /// When the scan finished.
     pub scanned_at: SystemTime,
     /// Where the advisories came from. The only caller that cares is the one
     /// that has to tell the user when something left the machine.
@@ -558,13 +611,20 @@ pub enum Source {
     /// Carried rather than logged because the report that results is
     /// indistinguishable from a clean one, and an unchecked dependency
     /// presented as clean is the failure this whole program exists to avoid.
-    PartialArchive { missing: Vec<Ecosystem> },
+    PartialArchive {
+        /// The ecosystems whose archives had not landed.
+        missing: Vec<Ecosystem>,
+    },
     /// osv.dev, carrying how many dependencies were asked about — which is what
     /// the user needs told, and is not the number of findings.
-    Api { checked: usize },
+    Api {
+        /// How many dependencies were named to osv.dev.
+        checked: usize,
+    },
 }
 
 impl Report {
+    /// A report from the archives, timestamped now.
     pub fn new(root: impl Into<PathBuf>, findings: Vec<Finding>) -> Self {
         Report {
             root: root.into(),

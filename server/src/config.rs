@@ -15,6 +15,7 @@ pub const NAME: &str = "package-checker";
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
+    /// The per-package path to osv.dev.
     pub online: Online,
 
     /// Never touch the network for matching; use the downloaded archives only.

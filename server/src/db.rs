@@ -43,13 +43,27 @@ const PEER_WAIT: Duration = Duration::from_secs(15 * 60);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
 
 #[derive(Debug, thiserror::Error)]
+/// Why the advisory cache could not be brought up to date.
 pub enum DbError {
     #[error("advisory database not ready: {0}")]
+    /// No usable archive, with what is known about why.
     NotReady(String),
     #[error("{context}: {source}")]
-    Io { context: String, source: io::Error },
+    /// A filesystem operation failed.
+    Io {
+        /// What was being done.
+        context: String,
+        /// The underlying error.
+        source: io::Error,
+    },
     #[error("fetch {url}: {message}")]
-    Fetch { url: String, message: String },
+    /// The bucket answered, but not with an archive.
+    Fetch {
+        /// What was requested.
+        url: String,
+        /// What went wrong, as the transport or the status reported it.
+        message: String,
+    },
 }
 
 fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> DbError {
@@ -62,7 +76,9 @@ fn io_err(context: impl Into<String>) -> impl FnOnce(io::Error) -> DbError {
 pub trait Progress: Send + Sync {
     /// `total` is `None` when the server sent no Content-Length.
     fn start(&self, ecosystem: Ecosystem, total: Option<u64>);
+    /// Bytes received so far.
     fn advance(&self, ecosystem: Ecosystem, downloaded: u64, total: Option<u64>);
+    /// The download finished, with the failure if it failed.
     fn done(&self, ecosystem: Ecosystem, error: Option<&str>);
 }
 
@@ -80,6 +96,8 @@ pub struct Database {
 }
 
 impl Database {
+    /// A cache rooted at `root`, reading the public bucket with a 24-hour
+    /// freshness window.
     pub fn new(root: impl Into<PathBuf>) -> Database {
         let config = ureq::Agent::config_builder()
             // npm's archive is 215 MB.
@@ -104,11 +122,13 @@ impl Database {
         self
     }
 
+    /// How long an archive is trusted before it is checked again.
     pub fn with_ttl(mut self, ttl: Duration) -> Self {
         self.ttl = ttl;
         self
     }
 
+    /// Reports downloads as they happen.
     pub fn with_progress(mut self, progress: Box<dyn Progress>) -> Self {
         self.progress = Some(progress);
         self
@@ -120,14 +140,17 @@ impl Database {
         self
     }
 
+    /// The cache directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    /// The directory holding one ecosystem's archive.
     pub fn dir_for(&self, ecosystem: Ecosystem) -> PathBuf {
         self.root.join(VENDOR_DIR).join(ecosystem.as_str())
     }
 
+    /// Where one ecosystem's `all.zip` lives.
     pub fn archive_path(&self, ecosystem: Ecosystem) -> PathBuf {
         self.dir_for(ecosystem).join(ARCHIVE_NAME)
     }
@@ -183,6 +206,11 @@ impl Database {
     /// them. Ordered smallest first: crates.io is 3 MB and npm is 205, and a
     /// Rust project waiting on npm's archive before seeing its own findings was
     /// the whole of the first-run problem.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::NotReady`] naming every ecosystem that could not be brought up
+    /// to date; the ones that could are still usable.
     pub fn ensure_each(
         &self,
         ecosystems: &[Ecosystem],
@@ -221,6 +249,10 @@ impl Database {
     }
 
     /// Downloads or revalidates every named ecosystem.
+    ///
+    /// # Errors
+    ///
+    /// As [`Database::ensure_each`].
     pub fn ensure(&self, ecosystems: &[Ecosystem]) -> Result<(), DbError> {
         self.ensure_each(ecosystems, |_| {})
     }
@@ -452,6 +484,11 @@ impl Database {
     /// Kept out of the index because it dominates its size while being needed
     /// only for the few advisories a project actually matches. One seek into the
     /// central directory, while a user is hovering rather than during a scan.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::NotReady`] when the archive or the advisory is not there, and
+    /// [`DbError::Io`] when it cannot be read.
     pub fn details(&self, ecosystem: Ecosystem, advisory_id: &str) -> Result<String, DbError> {
         let path = self.archive_path(ecosystem);
         let file = File::open(&path).map_err(io_err(format!("open {}", path.display())))?;
@@ -741,395 +778,415 @@ mod tests {
         fake_archive(&[("GHSA-1.json", &body)])
     }
 
-    #[test]
-    fn download_reports_progress() {
-        // The link between the download and the editor: without this the 205 MB
-        // first run looks like a hang.
-        let server = ArchiveServer::new(large_archive());
-        server.set(|s| s.delay = Duration::from_millis(250));
-        let root = tempfile::tempdir().unwrap();
-        let recorded = Arc::new(Mutex::new(Recorded::default()));
-        let db = server
-            .database(root.path())
-            .with_progress(Box::new(RecordingProgress(recorded.clone())));
+    mod ensure {
+        use super::*;
 
-        db.ensure(NPM).unwrap();
+        #[test]
+        fn ensure_downloads_then_reuses_cache() {
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
 
-        let r = recorded.lock().unwrap();
-        assert_eq!((r.starts, r.dones), (1, 1), "one start and one done");
-        assert_eq!(r.error, None);
-        assert!(
-            r.downloaded > 0,
-            "final downloaded count is the archive size"
-        );
-        if let Some(total) = r.total {
-            assert_eq!(r.downloaded, total, "the counts must agree at the end");
+            assert!(!db.ready(NPM), "ready before any download");
+            db.ensure(NPM).unwrap();
+            assert!(db.ready(NPM), "not ready after a successful download");
+            assert_eq!(server.requests(), 1);
+
+            // Within the TTL nothing should touch the network at all.
+            db.ensure(NPM).unwrap();
+            assert_eq!(server.requests(), 1, "a warm start made a request");
         }
-    }
 
-    #[test]
-    fn a_cached_archive_reports_no_progress() {
-        // A 304 moves no bytes, so opening a progress entry for it would flash
-        // an empty download at the user on every startup.
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let recorded = Arc::new(Mutex::new(Recorded::default()));
-        let db = server
-            .database(root.path())
-            .with_ttl(Duration::ZERO)
-            .with_progress(Box::new(RecordingProgress(recorded.clone())));
+        #[test]
+        fn ensure_revalidates_when_stale() {
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let now = Arc::new(Mutex::new(SystemTime::now()));
+            let clock = now.clone();
+            let db = server
+                .database(root.path())
+                .with_ttl(Duration::from_secs(3600))
+                .with_clock(move || *clock.lock().unwrap());
 
-        db.ensure(NPM).unwrap();
-        let after_first = recorded.lock().unwrap().starts;
-        db.ensure(NPM).unwrap();
+            db.ensure(NPM).unwrap();
 
-        assert_eq!(server.not_modified(), 1, "the second call revalidated");
-        assert_eq!(recorded.lock().unwrap().starts, after_first);
-    }
+            // Past the TTL the server is asked, but an unchanged ETag means a 304
+            // and no re-download.
+            *now.lock().unwrap() += Duration::from_secs(2 * 3600);
+            db.ensure(NPM).unwrap();
+            assert_eq!(server.requests(), 2);
+            assert_eq!(server.not_modified(), 1);
 
-    #[test]
-    fn ensure_downloads_then_reuses_cache() {
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
-
-        assert!(!db.ready(NPM), "ready before any download");
-        db.ensure(NPM).unwrap();
-        assert!(db.ready(NPM), "not ready after a successful download");
-        assert_eq!(server.requests(), 1);
-
-        // Within the TTL nothing should touch the network at all.
-        db.ensure(NPM).unwrap();
-        assert_eq!(server.requests(), 1, "a warm start made a request");
-    }
-
-    #[test]
-    fn ensure_revalidates_when_stale() {
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let now = Arc::new(Mutex::new(SystemTime::now()));
-        let clock = now.clone();
-        let db = server
-            .database(root.path())
-            .with_ttl(Duration::from_secs(3600))
-            .with_clock(move || *clock.lock().unwrap());
-
-        db.ensure(NPM).unwrap();
-
-        // Past the TTL the server is asked, but an unchanged ETag means a 304
-        // and no re-download.
-        *now.lock().unwrap() += Duration::from_secs(2 * 3600);
-        db.ensure(NPM).unwrap();
-        assert_eq!(server.requests(), 2);
-        assert_eq!(server.not_modified(), 1);
-
-        // And the freshness check must be recorded, or every scan would re-ask.
-        *now.lock().unwrap() += Duration::from_secs(30 * 60);
-        db.ensure(NPM).unwrap();
-        assert_eq!(server.requests(), 2, "a 304 did not refresh the timestamp");
-    }
-
-    #[test]
-    fn ensure_fetches_only_requested_ecosystems() {
-        // A Go project must never pay for npm's 205 MB.
-        let server = ArchiveServer::new(fake_archive(&[("GO-1.json", "{}")]));
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
-
-        db.ensure(&[Ecosystem::Go]).unwrap();
-
-        assert!(db.archive_path(Ecosystem::Go).exists());
-        for e in [Ecosystem::Npm, Ecosystem::PyPI, Ecosystem::CratesIo] {
-            assert!(
-                !db.archive_path(e).exists(),
-                "{e} was downloaded but not requested"
-            );
+            // And the freshness check must be recorded, or every scan would re-ask.
+            *now.lock().unwrap() += Duration::from_secs(30 * 60);
+            db.ensure(NPM).unwrap();
+            assert_eq!(server.requests(), 2, "a 304 did not refresh the timestamp");
         }
-    }
 
-    #[test]
-    fn ensure_rejects_corrupt_download() {
-        // A body that is not a zip must never be published, however cleanly it
-        // transferred: an error page served with a 200 looks like success.
-        let server = ArchiveServer::new(b"<html>502 Bad Gateway</html>".to_vec());
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
+        #[test]
+        fn ensure_fetches_only_requested_ecosystems() {
+            // A Go project must never pay for npm's 205 MB.
+            let server = ArchiveServer::new(fake_archive(&[("GO-1.json", "{}")]));
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
 
-        assert!(db.ensure(NPM).is_err(), "a non-zip body was accepted");
-        assert!(
-            !db.archive_path(Ecosystem::Npm).exists(),
-            "a corrupt archive was published"
-        );
-        // The temporary file must be cleaned up too.
-        for entry in fs::read_dir(db.dir_for(Ecosystem::Npm)).unwrap().flatten() {
-            let name = entry.file_name();
-            assert!(
-                name.to_string_lossy().ends_with(".lock"),
-                "left behind {}",
-                name.to_string_lossy()
-            );
-        }
-    }
+            db.ensure(&[Ecosystem::Go]).unwrap();
 
-    #[test]
-    fn ensure_rejects_checksum_mismatch() {
-        let server = ArchiveServer::new(one_entry_archive());
-        server.set(|s| s.mode = Serve::WrongChecksum);
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
-
-        let err = db
-            .ensure(NPM)
-            .expect_err("a checksum mismatch was accepted");
-        assert!(err.to_string().contains("checksum mismatch"), "{err}");
-        assert!(
-            !db.archive_path(Ecosystem::Npm).exists(),
-            "published despite a bad checksum"
-        );
-    }
-
-    #[test]
-    fn heal_recovers_from_truncated_archive() {
-        // The failure osv-scanner's own cache can leave behind: a half-written
-        // zip that offline matching never revalidates.
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
-        db.ensure(NPM).unwrap();
-
-        let archive = db.archive_path(Ecosystem::Npm);
-        let original = fs::read(&archive).unwrap();
-        fs::write(&archive, &original[..original.len() / 2]).unwrap();
-        assert!(
-            validate_zip(&archive).is_err(),
-            "truncation left a valid zip; nothing exercised"
-        );
-
-        db.ensure(NPM).unwrap();
-        validate_zip(&archive).expect("archive still unreadable after recovery");
-        assert_eq!(server.requests(), 2, "the corrupt copy must be re-fetched");
-    }
-
-    #[test]
-    fn concurrent_ensure_downloads_once() {
-        // Zed runs one server per worktree, so several processes routinely race
-        // on this cache. Exactly one should download; the rest wait and then
-        // succeed.
-        let server = ArchiveServer::new(one_entry_archive());
-        server.set(|s| s.delay = Duration::from_millis(100));
-        let root = tempfile::tempdir().unwrap();
-
-        std::thread::scope(|scope| {
-            let workers: Vec<_> = (0..5)
-                .map(|_| scope.spawn(|| server.database(root.path()).ensure(NPM)))
-                .collect();
-            for (i, worker) in workers.into_iter().enumerate() {
-                worker
-                    .join()
-                    .unwrap()
-                    .unwrap_or_else(|e| panic!("worker {i}: {e}"));
+            assert!(db.archive_path(Ecosystem::Go).exists());
+            for e in [Ecosystem::Npm, Ecosystem::PyPI, Ecosystem::CratesIo] {
+                assert!(
+                    !db.archive_path(e).exists(),
+                    "{e} was downloaded but not requested"
+                );
             }
-        });
+        }
 
-        assert_eq!(server.requests(), 1, "want exactly one download");
-        assert!(server.database(root.path()).ready(NPM));
-    }
+        #[test]
+        fn concurrent_ensure_downloads_once() {
+            // Zed runs one server per worktree, so several processes routinely race
+            // on this cache. Exactly one should download; the rest wait and then
+            // succeed.
+            let server = ArchiveServer::new(one_entry_archive());
+            server.set(|s| s.delay = Duration::from_millis(100));
+            let root = tempfile::tempdir().unwrap();
 
-    #[test]
-    fn reads_never_see_a_partial_archive() {
-        // Publishing is a rename, so a concurrent reader sees either the old
-        // complete archive or the new one, never a half-written file.
-        let server = ArchiveServer::new(one_entry_archive());
-        // Every request is answered with a full body, so every ensure republishes.
-        server.set(|s| s.conditional = false);
-        let root = tempfile::tempdir().unwrap();
-        let writer = server.database(root.path()).with_ttl(Duration::ZERO);
-        writer.ensure(NPM).unwrap();
-        let archive = writer.archive_path(Ecosystem::Npm);
-
-        let deadline = Instant::now() + Duration::from_secs(1);
-        let (reads, failures) = std::thread::scope(|scope| {
-            scope.spawn(|| {
-                while Instant::now() < deadline {
-                    let _ = writer.ensure(NPM);
+            std::thread::scope(|scope| {
+                let workers: Vec<_> = (0..5)
+                    .map(|_| scope.spawn(|| server.database(root.path()).ensure(NPM)))
+                    .collect();
+                for (i, worker) in workers.into_iter().enumerate() {
+                    worker
+                        .join()
+                        .unwrap()
+                        .unwrap_or_else(|e| panic!("worker {i}: {e}"));
                 }
             });
-            let (mut reads, mut failures) = (0, 0);
-            while Instant::now() < deadline {
-                if validate_zip(&archive).is_err() {
-                    failures += 1;
+
+            assert_eq!(server.requests(), 1, "want exactly one download");
+            assert!(server.database(root.path()).ready(NPM));
+        }
+
+        #[test]
+        fn ensure_reports_every_ecosystem_that_failed() {
+            let server = ArchiveServer::new(one_entry_archive());
+            server.set(|s| s.mode = Serve::NotFound);
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
+
+            let err = db
+                .ensure(&[Ecosystem::Npm, Ecosystem::Go])
+                .expect_err("a 404 was accepted");
+            // Both failures should be reported, not just the first.
+            let message = err.to_string();
+            assert!(message.contains("npm"), "{message}");
+            assert!(message.contains("Go"), "{message}");
+        }
+    }
+
+    mod verify {
+        use super::*;
+
+        #[test]
+        fn ensure_rejects_corrupt_download() {
+            // A body that is not a zip must never be published, however cleanly it
+            // transferred: an error page served with a 200 looks like success.
+            let server = ArchiveServer::new(b"<html>502 Bad Gateway</html>".to_vec());
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
+
+            assert!(db.ensure(NPM).is_err(), "a non-zip body was accepted");
+            assert!(
+                !db.archive_path(Ecosystem::Npm).exists(),
+                "a corrupt archive was published"
+            );
+            // The temporary file must be cleaned up too.
+            for entry in fs::read_dir(db.dir_for(Ecosystem::Npm)).unwrap().flatten() {
+                let name = entry.file_name();
+                assert!(
+                    name.to_string_lossy().ends_with(".lock"),
+                    "left behind {}",
+                    name.to_string_lossy()
+                );
+            }
+        }
+
+        #[test]
+        fn ensure_rejects_checksum_mismatch() {
+            let server = ArchiveServer::new(one_entry_archive());
+            server.set(|s| s.mode = Serve::WrongChecksum);
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
+
+            let err = db
+                .ensure(NPM)
+                .expect_err("a checksum mismatch was accepted");
+            assert!(err.to_string().contains("checksum mismatch"), "{err}");
+            assert!(
+                !db.archive_path(Ecosystem::Npm).exists(),
+                "published despite a bad checksum"
+            );
+        }
+
+        #[test]
+        fn reads_never_see_a_partial_archive() {
+            // Publishing is a rename, so a concurrent reader sees either the old
+            // complete archive or the new one, never a half-written file.
+            let server = ArchiveServer::new(one_entry_archive());
+            // Every request is answered with a full body, so every ensure republishes.
+            server.set(|s| s.conditional = false);
+            let root = tempfile::tempdir().unwrap();
+            let writer = server.database(root.path()).with_ttl(Duration::ZERO);
+            writer.ensure(NPM).unwrap();
+            let archive = writer.archive_path(Ecosystem::Npm);
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let (reads, failures) = std::thread::scope(|scope| {
+                scope.spawn(|| {
+                    while Instant::now() < deadline {
+                        let _ = writer.ensure(NPM);
+                    }
+                });
+                let (mut reads, mut failures) = (0, 0);
+                while Instant::now() < deadline {
+                    if validate_zip(&archive).is_err() {
+                        failures += 1;
+                    }
+                    reads += 1;
                 }
-                reads += 1;
-            }
-            (reads, failures)
-        });
+                (reads, failures)
+            });
 
-        assert_eq!(
-            failures, 0,
-            "{failures} of {reads} reads saw an invalid archive"
-        );
-        assert!(
-            reads >= 10,
-            "only {reads} reads; the test barely exercised anything"
-        );
-        assert!(server.requests() >= 2, "the writer never republished");
-    }
+            assert_eq!(
+                failures, 0,
+                "{failures} of {reads} reads saw an invalid archive"
+            );
+            assert!(
+                reads >= 10,
+                "only {reads} reads; the test barely exercised anything"
+            );
+            assert!(server.requests() >= 2, "the writer never republished");
+        }
 
-    #[test]
-    fn crc32c_is_read_from_the_header() {
-        let cases: &[(&str, &[&str], Option<u32>)] = &[
-            ("absent", &[], None),
-            ("md5 only", &["md5=6bBQJ2rnE5o/rJZDYqgAew=="], None),
-            ("crc32c alone", &["crc32c=W3hLNw=="], Some(0x5b78_4b37)),
-            (
-                "repeated headers",
-                &["md5=6bBQJ2rnE5o/rJZDYqgAew==", "crc32c=W3hLNw=="],
-                Some(0x5b78_4b37),
-            ),
-            (
-                "comma separated",
-                &["md5=6bBQJ2rnE5o/rJZDYqgAew==, crc32c=W3hLNw=="],
-                Some(0x5b78_4b37),
-            ),
-            ("malformed base64", &["crc32c=!!!"], None),
-            ("wrong length", &["crc32c=AAA="], None),
-        ];
-        for (name, values, want) in cases {
-            let mut headers = ureq::http::HeaderMap::new();
-            for value in *values {
-                headers.append("x-goog-hash", value.parse().unwrap());
+        #[test]
+        fn crc32c_is_read_from_the_header() {
+            let cases: &[(&str, &[&str], Option<u32>)] = &[
+                ("absent", &[], None),
+                ("md5 only", &["md5=6bBQJ2rnE5o/rJZDYqgAew=="], None),
+                ("crc32c alone", &["crc32c=W3hLNw=="], Some(0x5b78_4b37)),
+                (
+                    "repeated headers",
+                    &["md5=6bBQJ2rnE5o/rJZDYqgAew==", "crc32c=W3hLNw=="],
+                    Some(0x5b78_4b37),
+                ),
+                (
+                    "comma separated",
+                    &["md5=6bBQJ2rnE5o/rJZDYqgAew==, crc32c=W3hLNw=="],
+                    Some(0x5b78_4b37),
+                ),
+                ("malformed base64", &["crc32c=!!!"], None),
+                ("wrong length", &["crc32c=AAA="], None),
+            ];
+            for (name, values, want) in cases {
+                let mut headers = ureq::http::HeaderMap::new();
+                for value in *values {
+                    headers.append("x-goog-hash", value.parse().unwrap());
+                }
+                assert_eq!(crc32c_from_header(&headers), *want, "{name}");
             }
-            assert_eq!(crc32c_from_header(&headers), *want, "{name}");
         }
     }
 
-    #[test]
-    fn archive_url_uses_the_ecosystem_name_verbatim() {
-        // Normalising case or punctuation produces 404s.
-        let db = Database::new("unused");
-        for (ecosystem, suffix) in [
-            (Ecosystem::Npm, "/npm/all.zip"),
-            (Ecosystem::Go, "/Go/all.zip"),
-            (Ecosystem::PyPI, "/PyPI/all.zip"),
-            (Ecosystem::CratesIo, "/crates.io/all.zip"),
-        ] {
-            assert_eq!(db.archive_url(ecosystem), format!("{ARCHIVE_HOST}{suffix}"));
+    mod heal {
+        use super::*;
+
+        #[test]
+        fn heal_recovers_from_truncated_archive() {
+            // The failure osv-scanner's own cache can leave behind: a half-written
+            // zip that offline matching never revalidates.
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path());
+            db.ensure(NPM).unwrap();
+
+            let archive = db.archive_path(Ecosystem::Npm);
+            let original = fs::read(&archive).unwrap();
+            fs::write(&archive, &original[..original.len() / 2]).unwrap();
+            assert!(
+                validate_zip(&archive).is_err(),
+                "truncation left a valid zip; nothing exercised"
+            );
+
+            db.ensure(NPM).unwrap();
+            validate_zip(&archive).expect("archive still unreadable after recovery");
+            assert_eq!(server.requests(), 2, "the corrupt copy must be re-fetched");
+        }
+
+        #[test]
+        fn heal_does_not_reread_an_unchanged_archive() {
+            // Validation reads the central directory of a file that is 205 MB for
+            // npm, and ensure is reached hourly now that the database revalidates.
+            // An archive is only ever replaced by an atomic rename, so an unchanged
+            // modification time means unchanged bytes.
+            //
+            // The trade-off is deliberate and this test states it: corruption that
+            // leaves the modification time alone is not noticed. Nothing writes
+            // these files in place, so the only way to produce that is to do what
+            // this test does on purpose.
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path()).with_ttl(Duration::ZERO);
+            db.ensure(NPM).unwrap();
+
+            let archive = db.archive_path(Ecosystem::Npm);
+            let before = fs::metadata(&archive).unwrap().modified().unwrap();
+            fs::write(&archive, b"not a zip").unwrap();
+            File::options()
+                .write(true)
+                .open(&archive)
+                .unwrap()
+                .set_modified(before)
+                .unwrap();
+
+            db.ensure(NPM).unwrap();
+            assert_eq!(
+                fs::read(&archive).unwrap(),
+                b"not a zip",
+                "an archive whose modification time did not change was re-read and discarded"
+            );
+        }
+
+        #[test]
+        fn heal_still_catches_corruption_that_changes_the_file() {
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let db = server.database(root.path()).with_ttl(Duration::ZERO);
+            db.ensure(NPM).unwrap();
+
+            // Corrupt it the way a crash mid-write would: new bytes, new mtime.
+            let archive = db.archive_path(Ecosystem::Npm);
+            std::thread::sleep(Duration::from_millis(20));
+            fs::write(&archive, b"not a zip").unwrap();
+
+            db.ensure(NPM).unwrap();
+            validate_zip(&archive).expect("a corrupted archive was left in place");
+        }
+
+        #[test]
+        fn heal_ignores_a_directory_where_the_archive_should_be() {
+            let root = tempfile::tempdir().unwrap();
+            let db = Database::new(root.path());
+            let archive = db.archive_path(Ecosystem::Npm);
+            fs::create_dir_all(&archive).unwrap();
+
+            db.heal(Ecosystem::Npm);
+            assert!(
+                archive.is_dir(),
+                "heal removed something that was not an archive"
+            );
         }
     }
 
-    #[test]
-    fn ensure_reports_every_ecosystem_that_failed() {
-        let server = ArchiveServer::new(one_entry_archive());
-        server.set(|s| s.mode = Serve::NotFound);
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path());
+    mod progress {
+        use super::*;
 
-        let err = db
-            .ensure(&[Ecosystem::Npm, Ecosystem::Go])
-            .expect_err("a 404 was accepted");
-        // Both failures should be reported, not just the first.
-        let message = err.to_string();
-        assert!(message.contains("npm"), "{message}");
-        assert!(message.contains("Go"), "{message}");
+        #[test]
+        fn download_reports_progress() {
+            // The link between the download and the editor: without this the 205 MB
+            // first run looks like a hang.
+            let server = ArchiveServer::new(large_archive());
+            server.set(|s| s.delay = Duration::from_millis(250));
+            let root = tempfile::tempdir().unwrap();
+            let recorded = Arc::new(Mutex::new(Recorded::default()));
+            let db = server
+                .database(root.path())
+                .with_progress(Box::new(RecordingProgress(recorded.clone())));
+
+            db.ensure(NPM).unwrap();
+
+            let r = recorded.lock().unwrap();
+            assert_eq!((r.starts, r.dones), (1, 1), "one start and one done");
+            assert_eq!(r.error, None);
+            assert!(
+                r.downloaded > 0,
+                "final downloaded count is the archive size"
+            );
+            if let Some(total) = r.total {
+                assert_eq!(r.downloaded, total, "the counts must agree at the end");
+            }
+        }
+
+        #[test]
+        fn a_cached_archive_reports_no_progress() {
+            // A 304 moves no bytes, so opening a progress entry for it would flash
+            // an empty download at the user on every startup.
+            let server = ArchiveServer::new(one_entry_archive());
+            let root = tempfile::tempdir().unwrap();
+            let recorded = Arc::new(Mutex::new(Recorded::default()));
+            let db = server
+                .database(root.path())
+                .with_ttl(Duration::ZERO)
+                .with_progress(Box::new(RecordingProgress(recorded.clone())));
+
+            db.ensure(NPM).unwrap();
+            let after_first = recorded.lock().unwrap().starts;
+            db.ensure(NPM).unwrap();
+
+            assert_eq!(server.not_modified(), 1, "the second call revalidated");
+            assert_eq!(recorded.lock().unwrap().starts, after_first);
+        }
     }
 
-    #[test]
-    fn default_root_is_under_the_user_cache() {
-        let Some(root) = default_root() else {
-            eprintln!("no user cache directory available");
-            return;
-        };
-        assert!(root.is_absolute(), "{}", root.display());
-        assert!(
-            root.ends_with("zed-package-checker/db"),
-            "{}",
-            root.display()
-        );
-    }
+    mod paths {
+        use super::*;
 
-    #[test]
-    fn heal_does_not_reread_an_unchanged_archive() {
-        // Validation reads the central directory of a file that is 205 MB for
-        // npm, and ensure is reached hourly now that the database revalidates.
-        // An archive is only ever replaced by an atomic rename, so an unchanged
-        // modification time means unchanged bytes.
-        //
-        // The trade-off is deliberate and this test states it: corruption that
-        // leaves the modification time alone is not noticed. Nothing writes
-        // these files in place, so the only way to produce that is to do what
-        // this test does on purpose.
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path()).with_ttl(Duration::ZERO);
-        db.ensure(NPM).unwrap();
+        #[test]
+        fn archive_url_uses_the_ecosystem_name_verbatim() {
+            // Normalising case or punctuation produces 404s.
+            let db = Database::new("unused");
+            for (ecosystem, suffix) in [
+                (Ecosystem::Npm, "/npm/all.zip"),
+                (Ecosystem::Go, "/Go/all.zip"),
+                (Ecosystem::PyPI, "/PyPI/all.zip"),
+                (Ecosystem::CratesIo, "/crates.io/all.zip"),
+            ] {
+                assert_eq!(db.archive_url(ecosystem), format!("{ARCHIVE_HOST}{suffix}"));
+            }
+        }
 
-        let archive = db.archive_path(Ecosystem::Npm);
-        let before = fs::metadata(&archive).unwrap().modified().unwrap();
-        fs::write(&archive, b"not a zip").unwrap();
-        File::options()
-            .write(true)
-            .open(&archive)
-            .unwrap()
-            .set_modified(before)
+        #[test]
+        fn default_root_is_under_the_user_cache() {
+            let Some(root) = default_root() else {
+                eprintln!("no user cache directory available");
+                return;
+            };
+            assert!(root.is_absolute(), "{}", root.display());
+            assert!(
+                root.ends_with("zed-package-checker/db"),
+                "{}",
+                root.display()
+            );
+        }
+
+        #[test]
+        fn details_are_read_back_from_the_archive() {
+            let root = tempfile::tempdir().unwrap();
+            let db = Database::new(root.path());
+            let archive = db.archive_path(Ecosystem::Npm);
+            fs::create_dir_all(archive.parent().unwrap()).unwrap();
+            fs::write(
+                &archive,
+                fake_archive(&[(
+                    "GHSA-1.json",
+                    r#"{"id":"GHSA-1","details":"the full prose description","affected":[]}"#,
+                )]),
+            )
             .unwrap();
 
-        db.ensure(NPM).unwrap();
-        assert_eq!(
-            fs::read(&archive).unwrap(),
-            b"not a zip",
-            "an archive whose modification time did not change was re-read and discarded"
-        );
-    }
-
-    #[test]
-    fn heal_still_catches_corruption_that_changes_the_file() {
-        let server = ArchiveServer::new(one_entry_archive());
-        let root = tempfile::tempdir().unwrap();
-        let db = server.database(root.path()).with_ttl(Duration::ZERO);
-        db.ensure(NPM).unwrap();
-
-        // Corrupt it the way a crash mid-write would: new bytes, new mtime.
-        let archive = db.archive_path(Ecosystem::Npm);
-        std::thread::sleep(Duration::from_millis(20));
-        fs::write(&archive, b"not a zip").unwrap();
-
-        db.ensure(NPM).unwrap();
-        validate_zip(&archive).expect("a corrupted archive was left in place");
-    }
-
-    #[test]
-    fn details_are_read_back_from_the_archive() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Database::new(root.path());
-        let archive = db.archive_path(Ecosystem::Npm);
-        fs::create_dir_all(archive.parent().unwrap()).unwrap();
-        fs::write(
-            &archive,
-            fake_archive(&[(
-                "GHSA-1.json",
-                r#"{"id":"GHSA-1","details":"the full prose description","affected":[]}"#,
-            )]),
-        )
-        .unwrap();
-
-        assert_eq!(
-            db.details(Ecosystem::Npm, "GHSA-1").unwrap(),
-            "the full prose description"
-        );
-        assert!(db.details(Ecosystem::Npm, "GHSA-absent").is_err());
-    }
-
-    #[test]
-    fn heal_ignores_a_directory_where_the_archive_should_be() {
-        let root = tempfile::tempdir().unwrap();
-        let db = Database::new(root.path());
-        let archive = db.archive_path(Ecosystem::Npm);
-        fs::create_dir_all(&archive).unwrap();
-
-        db.heal(Ecosystem::Npm);
-        assert!(
-            archive.is_dir(),
-            "heal removed something that was not an archive"
-        );
+            assert_eq!(
+                db.details(Ecosystem::Npm, "GHSA-1").unwrap(),
+                "the full prose description"
+            );
+            assert!(db.details(Ecosystem::Npm, "GHSA-absent").is_err());
+        }
     }
 }

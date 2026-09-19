@@ -84,6 +84,7 @@ impl Index {
         postings.iter().map(|&i| &self.advisories[i as usize])
     }
 
+    /// Which ecosystems' archives this index was built from.
     pub fn ecosystems(&self) -> &[Ecosystem] {
         &self.ecosystems
     }
@@ -107,10 +108,12 @@ impl Index {
         postings + map + names
     }
 
+    /// How many advisories are indexed.
     pub fn advisories(&self) -> usize {
         self.advisories.len()
     }
 
+    /// How many distinct packages have at least one advisory.
     pub fn packages(&self) -> usize {
         self.by_package.len()
     }
@@ -120,6 +123,7 @@ impl Index {
         self.load_time
     }
 
+    /// When the index was built.
     pub fn built_at(&self) -> Option<SystemTime> {
         self.built_at
     }

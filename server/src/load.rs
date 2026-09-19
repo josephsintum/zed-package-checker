@@ -31,17 +31,25 @@ pub enum Strategy {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Why an archive could not be turned into an index.
 pub enum LoadError {
     #[error("advisory database not ready: {0}")]
+    /// The archive is present but unusable, with why.
     NotReady(String),
     #[error("open {path}: {source}")]
+    /// The archive could not be opened or mapped.
     Open {
+        /// The archive.
         path: PathBuf,
+        /// The underlying error.
         source: std::io::Error,
     },
     #[error("read {path}: {source}")]
+    /// The archive is not a readable zip.
     Zip {
+        /// The archive.
         path: PathBuf,
+        /// What the zip reader reported.
         source: zip::result::ZipError,
     },
 }
@@ -49,8 +57,11 @@ pub enum LoadError {
 /// What one archive contributed, for logging and for the benchmarks.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ArchiveStats {
+    /// JSON entries seen.
     pub entries: usize,
+    /// Advisories kept.
     pub indexed: usize,
+    /// Entries that could not be decoded.
     pub skipped: usize,
     /// Time spent inflating entries, and time spent parsing them. Split because
     /// "Rust is faster" is not an explanation, and these two answer different
@@ -58,6 +69,7 @@ pub struct ArchiveStats {
     /// JSON one. Only filled in by the sequential strategy, where the phases do
     /// not overlap.
     pub inflate: std::time::Duration,
+    /// Time spent parsing entries; see `inflate`.
     pub parse: std::time::Duration,
 }
 
@@ -66,6 +78,12 @@ pub struct ArchiveStats {
 /// Only the ecosystems a project actually uses are passed in, which is the
 /// single largest saving available: a Go project reads 12 MB rather than npm's
 /// 215 MB, and most projects never touch npm's at all.
+///
+/// # Errors
+///
+/// [`LoadError::Open`] or [`LoadError::Zip`] when an archive cannot be read,
+/// and [`LoadError::NotReady`] when every entry in one fails to decode —
+/// corruption, not content.
 pub fn load(
     archives: &[(Ecosystem, PathBuf)],
     strategy: Strategy,

@@ -112,6 +112,7 @@ impl Publisher for ClientPublisher {
     }
 }
 
+/// The language server, as `tower-lsp-server` drives it.
 pub struct Backend {
     client: Client,
     version: String,

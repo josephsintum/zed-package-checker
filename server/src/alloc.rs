@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static LIVE: AtomicUsize = AtomicUsize::new(0);
 
+/// A global allocator that counts live bytes on top of [`System`].
 pub struct Counting;
 
 // SAFETY: every method forwards to `System` with the layout it was given and

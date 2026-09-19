@@ -28,6 +28,7 @@ use semver_like::SemverLike;
 pub enum Version<'a> {
     /// npm, Go and crates.io all order versions the same way.
     Semver(SemverLike<'a>),
+    /// PEP 440 with the setuptools-era legacy fallback.
     PyPI(PyPiVersion),
 }
 
@@ -38,7 +39,9 @@ pub enum Version<'a> {
 /// ecosystem with a fallible grammar is not an API change.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ParseError {
+    /// The string that was rejected.
     pub version: String,
+    /// The grammar it was tried against.
     pub ecosystem: Ecosystem,
 }
 
@@ -51,6 +54,11 @@ impl fmt::Display for ParseError {
 impl std::error::Error for ParseError {}
 
 impl<'a> Version<'a> {
+    /// Parses `version` under `ecosystem`'s grammar.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError`] if the grammar rejects it. No grammar here does today.
     pub fn parse(version: &'a str, ecosystem: Ecosystem) -> Result<Version<'a>, ParseError> {
         match ecosystem {
             Ecosystem::Npm | Ecosystem::Go | Ecosystem::CratesIo => {
@@ -61,6 +69,11 @@ impl<'a> Version<'a> {
     }
 
     /// Compares against another version string in the same ecosystem.
+    ///
+    /// # Errors
+    ///
+    /// [`ParseError`] if `other` cannot be parsed. No grammar here rejects
+    /// anything today.
     pub fn compare_str(&self, other: &str) -> Result<Ordering, ParseError> {
         match self {
             Version::Semver(v) => Ok(v.compare(&SemverLike::parse(other))),

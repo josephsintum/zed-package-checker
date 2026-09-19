@@ -29,14 +29,19 @@ pub const SKIP_DIRS: &[&str] = &[
 const DEFAULT_MAX_FILES: usize = 100_000;
 
 #[derive(Debug, thiserror::Error)]
+/// Why a workspace could not be walked at all.
 pub enum ExtractError {
     #[error("walk {root}: {source}")]
+    /// The root itself could not be walked.
     Walk {
+        /// The workspace that was asked for.
         root: PathBuf,
+        /// What the walker reported.
         source: ignore::Error,
     },
 }
 
+/// Finds every dependency declared under a directory.
 pub struct Extractor {
     /// Added to `SKIP_DIRS`, never replacing it: replacing is a footgun, and
     /// nobody wants to re-specify `node_modules` to exclude one fixture tree.
@@ -54,10 +59,12 @@ impl Default for Extractor {
 }
 
 impl Extractor {
+    /// An extractor with the built-in skip list and walk cap.
     pub fn new() -> Extractor {
         Extractor::default()
     }
 
+    /// Directory names to skip, in addition to the built-in list.
     pub fn with_exclude(mut self, dirs: impl IntoIterator<Item = String>) -> Self {
         self.exclude.extend(dirs);
         self
@@ -71,6 +78,11 @@ impl Extractor {
     }
 
     /// Every dependency declared anywhere under `root`.
+    ///
+    /// # Errors
+    ///
+    /// [`ExtractError::Walk`] when `root` is not a directory. Anything less than
+    /// that — an unreadable subdirectory, an unparseable file — is skipped and logged.
     pub fn extract(&self, root: &Path) -> Result<Vec<ExtractedPackage>, ExtractError> {
         // Owned, because the walker's filter outlives this borrow of `self`.
         let skip: Vec<String> = SKIP_DIRS

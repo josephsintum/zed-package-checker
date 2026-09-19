@@ -24,6 +24,7 @@ enum Step {
     Done(Option<String>),
 }
 
+/// Reports archive downloads to the editor as `$/progress`.
 pub struct ClientProgress {
     client: Client,
     /// Captured at construction: the callbacks arrive on a thread with no
@@ -33,6 +34,7 @@ pub struct ClientProgress {
 }
 
 impl ClientProgress {
+    /// A reporter for `client`, spawning its tasks on `handle`.
     pub fn new(client: Client, handle: Handle) -> ClientProgress {
         ClientProgress {
             client,

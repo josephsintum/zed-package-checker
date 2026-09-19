@@ -21,14 +21,20 @@ pub const DEFAULT_DEBOUNCE: Duration = Duration::from_secs(1);
 /// Why a scan was asked for. Reported in logs; it never changes what is done.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Reason {
+    /// The server just initialised.
     Startup,
+    /// A watched manifest or lockfile changed.
     FileChanged,
+    /// The editor saved a manifest.
     FileSaved,
+    /// The advisory database landed or changed.
     DatabaseSync,
+    /// Configuration changed, or a rescan was asked for.
     Manual,
 }
 
 impl Reason {
+    /// The reason as it appears in logs.
     pub const fn as_str(self) -> &'static str {
         match self {
             Reason::Startup => "startup",
@@ -42,6 +48,7 @@ impl Reason {
 
 /// Sends diagnostics to the client. Implemented by the LSP layer.
 pub trait Publisher: Send + Sync + 'static {
+    /// Replaces a file's diagnostics; an empty set clears them.
     fn publish(&self, path: PathBuf, findings: Vec<Finding>);
 
     /// Something the user should know that is not a diagnostic.
@@ -69,6 +76,8 @@ pub struct Requester {
 }
 
 impl Requester {
+    /// Asks for a scan. Never blocks: a full queue already holds the same
+    /// instruction.
     pub fn request(&self, reason: Reason) {
         let _ = self.tx.try_send(Message::Request(reason));
     }
@@ -121,6 +130,7 @@ impl Engine {
         (Requester { tx: tx.clone() }, PendingEngine { tx, rx })
     }
 
+    /// Starts the scheduler when nothing else needs to ask for scans.
     pub fn start(
         root: PathBuf,
         scanner: Arc<dyn Scanner>,

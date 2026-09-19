@@ -400,251 +400,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_verified_fix_is_named() {
-        let f = Finding {
-            fix: Fix::Clears("4.18.0".into()),
-            ..finding()
-        };
-        assert!(
-            message_for(&f, false).ends_with(". Fixed in 4.18.0"),
-            "{}",
-            message_for(&f, false)
-        );
-    }
-
-    #[test]
-    fn no_clearing_version_is_said_rather_than_guessed() {
-        // "all of them" needs something to be plural about.
-        let one = Finding {
-            fix: Fix::Partial,
-            ..finding()
-        };
-        let message = message_for(&one, false);
-        assert!(
-            message.contains(". No published version clears it"),
-            "{message}"
-        );
-        // Naming any one version here is the defect this replaces.
-        assert!(!message.contains("Fixed in"), "{message}");
-
-        let several = Finding {
-            fix: Fix::Partial,
-            advisories: vec![advisory("GHSA-1", 7.2), advisory("GHSA-2", 5.0)],
-            ..finding()
-        };
-        let message = message_for(&several, false);
-        assert!(
-            message.contains(". No single version clears all of them"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn an_unfixed_finding_says_nothing_about_a_fix() {
-        let message = message_for(&finding(), false);
-        assert!(!message.contains("Fixed in"), "{message}");
-        assert!(!message.contains("clears"), "{message}");
-    }
-
-    #[test]
-    fn the_go_toolchain_names_a_verified_fix() {
-        // Suppressed before, because the worst advisory's fix cleared almost
-        // none of the other seventy-five. A verified one has no such problem.
-        let f = Finding {
-            package: Package::new(Ecosystem::Go, "stdlib", "1.21"),
-            advisories: vec![advisory("GO-1", 0.0), advisory("GO-2", 0.0)],
-            fix: Fix::Clears("1.25.13".into()),
-            ..finding()
-        };
-        assert!(message_for(&f, false).contains(". Fixed in 1.25.13"));
-    }
-
-    #[test]
-    fn a_lockfile_resolved_finding_says_the_manifest_is_not_enough() {
-        let message = message_for(&lockfile_resolved(), false);
-        assert!(
-            message.contains(
-                ". Version comes from the lockfile, so editing this file alone will not clear it"
-            ),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn a_manifest_only_finding_does_not() {
-        assert!(!message_for(&finding(), false).contains("lockfile"));
-        // Nor does a range-inferred one, which is the other provenance case.
-        let ranged = Finding {
-            from_range: true,
-            ..finding()
-        };
-        assert!(!message_for(&ranged, false).contains("lockfile"));
-    }
-
-    #[test]
-    fn the_lockfile_clause_and_the_related_link_agree() {
-        // Both derive from `resolved_elsewhere`, so a diagnostic can never
-        // carry the link without the sentence or the other way round.
-        for f in [finding(), lockfile_resolved()] {
-            let says = message_for(&f, false).contains("lockfile");
-            let links = finding_diagnostic(&f, false)
-                .expect("a finding with advisories renders")
-                .related_information
-                .is_some();
-            assert_eq!(says, links, "{}", message_for(&f, false));
-        }
-    }
-
-    #[test]
-    fn fixed_version_is_omitted_rather_than_null() {
-        // A consumer testing for the key must not be handed `null`, which is
-        // what `Option` serialised to before.
-        for fix in [Fix::None, Fix::Partial] {
-            let data = finding_diagnostic(&Finding { fix, ..finding() }, false)
-                .expect("a finding with advisories renders")
-                .data
-                .expect("data");
-            assert!(data.get("fixedVersion").is_none(), "{data}");
-        }
-
-        let data = finding_diagnostic(
-            &Finding {
-                fix: Fix::Clears("4.18.0".into()),
-                ..finding()
-            },
-            false,
-        )
-        .expect("a finding with advisories renders")
-        .data
-        .expect("data");
-        assert_eq!(data["fixedVersion"], "4.18.0");
-    }
-
-    #[test]
-    fn a_malicious_finding_is_never_demoted() {
-        let f = Finding {
-            advisories: vec![advisory("MAL-2024-1", 0.0)],
-            dep_groups: vec![DEV_GROUP.to_owned()],
-            reachable: Some(false),
-            ..finding()
-        };
-        assert!(message_for(&f, false).starts_with("MALICIOUS: "));
-        assert_eq!(severity_for(&f), DiagnosticSeverity::ERROR);
-    }
-
-    #[test]
-    fn a_development_dependency_is_demoted_and_labelled() {
-        let f = Finding {
-            dep_groups: vec![DEV_GROUP.to_owned()],
-            ..finding()
-        };
-        assert!(message_for(&f, false).ends_with(". Development dependency"));
-        assert_ne!(severity_for(&f), severity_for(&finding()));
-    }
-
-    #[test]
-    fn the_summary_anchors_on_a_line_the_manifest_must_have() {
-        // Line 1 would not survive reformatting, so each format has a
-        // declaration the anchor hunts for instead.
-        let source = "{\n  \"name\": \"x\",\n  \"dependencies\": {}\n}\n";
-        assert_eq!(
-            summary_anchor_line(Path::new("/p/package.json"), Some(source)),
-            2
-        );
-        // With nothing to read, line 1 is the honest fallback.
-        assert_eq!(summary_anchor_line(Path::new("/p/package.json"), None), 1);
-    }
-
-    #[test]
-    fn a_fixable_finding_says_which_key_applies_it() {
-        let f = Finding {
-            fix: Fix::Clears("4.18.0".into()),
-            ..finding()
-        };
-        let message = message_for(&f, true);
-        assert!(
-            message.ends_with(&format!(". Press {FIX_KEY} to update to 4.18.0")),
-            "{message}"
-        );
-        // The instruction goes last, after every fact about the finding.
-        assert!(message.contains(". Fixed in 4.18.0"), "{message}");
-    }
-
-    #[test]
-    fn a_finding_with_nowhere_to_write_the_version_promises_nothing() {
-        // A transitive dependency anchored in a lockfile has a verified fix and
-        // no editable span. Naming a key that does nothing is worse than silence.
-        let f = Finding {
-            fix: Fix::Clears("4.18.0".into()),
-            ..finding()
-        };
-        let message = message_for(&f, false);
-        assert!(!message.contains("Press"), "{message}");
-        assert!(message.contains(". Fixed in 4.18.0"), "{message}");
-    }
-
-    #[test]
-    fn no_verified_fix_means_no_instruction_even_where_the_version_is_writable() {
-        for fix in [Fix::Partial, Fix::None] {
-            let f = Finding { fix, ..finding() };
-            let message = message_for(&f, true);
-            assert!(!message.contains("Press"), "{message}");
-        }
-    }
-
-    #[test]
-    fn severity_follows_the_score_and_dev_demotes_one_step() {
-        let cases: &[(&str, f64, bool, DiagnosticSeverity)] = &[
-            (
-                "critical is an error",
-                9.8,
-                false,
-                DiagnosticSeverity::ERROR,
-            ),
-            ("high is an error", 7.5, false, DiagnosticSeverity::ERROR),
-            (
-                "medium is a warning",
-                5.0,
-                false,
-                DiagnosticSeverity::WARNING,
-            ),
-            ("low is a warning", 2.0, false, DiagnosticSeverity::WARNING),
-            (
-                "unscored is a warning",
-                0.0,
-                false,
-                DiagnosticSeverity::WARNING,
-            ),
-            // Development dependencies do not ship, so they are demoted
-            // rather than hidden.
-            (
-                "a dev dependency is demoted",
-                9.8,
-                true,
-                DiagnosticSeverity::WARNING,
-            ),
-            (
-                "a low dev dependency is demoted further",
-                2.0,
-                true,
-                DiagnosticSeverity::INFORMATION,
-            ),
-        ];
-        for (name, score, dev, want) in cases {
-            let f = Finding {
-                advisories: vec![advisory("GHSA-1", *score)],
-                dep_groups: if *dev {
-                    vec![DEV_GROUP.to_owned()]
-                } else {
-                    Vec::new()
-                },
-                ..finding()
-            };
-            assert_eq!(severity_for(&f), *want, "{name}");
-        }
-    }
-
     fn with(name: &str, score: f64, line: u32) -> Finding {
         Finding {
             package: Package::new(Ecosystem::Npm, name, "1.0.0"),
@@ -654,96 +409,357 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_summary_leads_when_more_than_one_thing_is_wrong() {
-        // Per-package diagnostics scatter; the summary is the one line that
-        // says the file has a problem.
-        let findings = [with("a", 9.8, 3), with("b", 7.5, 4), with("c", 5.0, 5)];
-        let diagnostics = for_file(Path::new("/p/package.json"), &findings, Encoding::Utf8);
-        assert_eq!(diagnostics.len(), 4, "three findings plus a summary");
+    mod message {
+        use super::*;
 
-        let summary = &diagnostics[0];
-        assert_eq!(summary.code, Some(NumberOrString::String("summary".into())));
-        for want in [
-            "3 vulnerable dependencies",
-            "1 critical",
-            "1 high",
-            "1 medium",
-        ] {
+        #[test]
+        fn a_verified_fix_is_named() {
+            let f = Finding {
+                fix: Fix::Clears("4.18.0".into()),
+                ..finding()
+            };
             assert!(
-                summary.message.contains(want),
-                "{:?} lacks {want}",
-                summary.message
+                message_for(&f, false).ends_with(". Fixed in 4.18.0"),
+                "{}",
+                message_for(&f, false)
             );
         }
-        // Nothing to read at that path, so the first line is the anchor.
-        assert_eq!(summary.range.start.line, 0);
-        assert_eq!(summary.data.as_ref().unwrap()["summary"], true);
+
+        #[test]
+        fn no_clearing_version_is_said_rather_than_guessed() {
+            // "all of them" needs something to be plural about.
+            let one = Finding {
+                fix: Fix::Partial,
+                ..finding()
+            };
+            let message = message_for(&one, false);
+            assert!(
+                message.contains(". No published version clears it"),
+                "{message}"
+            );
+            // Naming any one version here is the defect this replaces.
+            assert!(!message.contains("Fixed in"), "{message}");
+
+            let several = Finding {
+                fix: Fix::Partial,
+                advisories: vec![advisory("GHSA-1", 7.2), advisory("GHSA-2", 5.0)],
+                ..finding()
+            };
+            let message = message_for(&several, false);
+            assert!(
+                message.contains(". No single version clears all of them"),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn an_unfixed_finding_says_nothing_about_a_fix() {
+            let message = message_for(&finding(), false);
+            assert!(!message.contains("Fixed in"), "{message}");
+            assert!(!message.contains("clears"), "{message}");
+        }
+
+        #[test]
+        fn the_go_toolchain_names_a_verified_fix() {
+            // Suppressed before, because the worst advisory's fix cleared almost
+            // none of the other seventy-five. A verified one has no such problem.
+            let f = Finding {
+                package: Package::new(Ecosystem::Go, "stdlib", "1.21"),
+                advisories: vec![advisory("GO-1", 0.0), advisory("GO-2", 0.0)],
+                fix: Fix::Clears("1.25.13".into()),
+                ..finding()
+            };
+            assert!(message_for(&f, false).contains(". Fixed in 1.25.13"));
+        }
+
+        #[test]
+        fn a_lockfile_resolved_finding_says_the_manifest_is_not_enough() {
+            let message = message_for(&lockfile_resolved(), false);
+            assert!(
+                message.contains(
+                    ". Version comes from the lockfile, so editing this file alone will not clear it"
+                ),
+                "{message}"
+            );
+        }
+
+        #[test]
+        fn a_manifest_only_finding_does_not() {
+            assert!(!message_for(&finding(), false).contains("lockfile"));
+            // Nor does a range-inferred one, which is the other provenance case.
+            let ranged = Finding {
+                from_range: true,
+                ..finding()
+            };
+            assert!(!message_for(&ranged, false).contains("lockfile"));
+        }
+
+        #[test]
+        fn the_lockfile_clause_and_the_related_link_agree() {
+            // Both derive from `resolved_elsewhere`, so a diagnostic can never
+            // carry the link without the sentence or the other way round.
+            for f in [finding(), lockfile_resolved()] {
+                let says = message_for(&f, false).contains("lockfile");
+                let links = finding_diagnostic(&f, false)
+                    .expect("a finding with advisories renders")
+                    .related_information
+                    .is_some();
+                assert_eq!(says, links, "{}", message_for(&f, false));
+            }
+        }
+
+        #[test]
+        fn a_fixable_finding_says_which_key_applies_it() {
+            let f = Finding {
+                fix: Fix::Clears("4.18.0".into()),
+                ..finding()
+            };
+            let message = message_for(&f, true);
+            assert!(
+                message.ends_with(&format!(". Press {FIX_KEY} to update to 4.18.0")),
+                "{message}"
+            );
+            // The instruction goes last, after every fact about the finding.
+            assert!(message.contains(". Fixed in 4.18.0"), "{message}");
+        }
+
+        #[test]
+        fn a_finding_with_nowhere_to_write_the_version_promises_nothing() {
+            // A transitive dependency anchored in a lockfile has a verified fix and
+            // no editable span. Naming a key that does nothing is worse than silence.
+            let f = Finding {
+                fix: Fix::Clears("4.18.0".into()),
+                ..finding()
+            };
+            let message = message_for(&f, false);
+            assert!(!message.contains("Press"), "{message}");
+            assert!(message.contains(". Fixed in 4.18.0"), "{message}");
+        }
+
+        #[test]
+        fn no_verified_fix_means_no_instruction_even_where_the_version_is_writable() {
+            for fix in [Fix::Partial, Fix::None] {
+                let f = Finding { fix, ..finding() };
+                let message = message_for(&f, true);
+                assert!(!message.contains("Press"), "{message}");
+            }
+        }
     }
 
-    #[test]
-    fn one_finding_is_its_own_summary() {
-        let diagnostics = for_file(
-            Path::new("/p/package.json"),
-            &[with("a", 9.8, 3)],
-            Encoding::Utf8,
-        );
-        assert_eq!(diagnostics.len(), 1);
-        assert_ne!(
-            diagnostics[0].code,
-            Some(NumberOrString::String("summary".into()))
-        );
+    mod severity {
+        use super::*;
+
+        #[test]
+        fn a_malicious_finding_is_never_demoted() {
+            let f = Finding {
+                advisories: vec![advisory("MAL-2024-1", 0.0)],
+                dep_groups: vec![DEV_GROUP.to_owned()],
+                reachable: Some(false),
+                ..finding()
+            };
+            assert!(message_for(&f, false).starts_with("MALICIOUS: "));
+            assert_eq!(severity_for(&f), DiagnosticSeverity::ERROR);
+        }
+
+        #[test]
+        fn a_development_dependency_is_demoted_and_labelled() {
+            let f = Finding {
+                dep_groups: vec![DEV_GROUP.to_owned()],
+                ..finding()
+            };
+            assert!(message_for(&f, false).ends_with(". Development dependency"));
+            assert_ne!(severity_for(&f), severity_for(&finding()));
+        }
+
+        #[test]
+        fn severity_follows_the_score_and_dev_demotes_one_step() {
+            let cases: &[(&str, f64, bool, DiagnosticSeverity)] = &[
+                (
+                    "critical is an error",
+                    9.8,
+                    false,
+                    DiagnosticSeverity::ERROR,
+                ),
+                ("high is an error", 7.5, false, DiagnosticSeverity::ERROR),
+                (
+                    "medium is a warning",
+                    5.0,
+                    false,
+                    DiagnosticSeverity::WARNING,
+                ),
+                ("low is a warning", 2.0, false, DiagnosticSeverity::WARNING),
+                (
+                    "unscored is a warning",
+                    0.0,
+                    false,
+                    DiagnosticSeverity::WARNING,
+                ),
+                // Development dependencies do not ship, so they are demoted
+                // rather than hidden.
+                (
+                    "a dev dependency is demoted",
+                    9.8,
+                    true,
+                    DiagnosticSeverity::WARNING,
+                ),
+                (
+                    "a low dev dependency is demoted further",
+                    2.0,
+                    true,
+                    DiagnosticSeverity::INFORMATION,
+                ),
+            ];
+            for (name, score, dev, want) in cases {
+                let f = Finding {
+                    advisories: vec![advisory("GHSA-1", *score)],
+                    dep_groups: if *dev {
+                        vec![DEV_GROUP.to_owned()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..finding()
+                };
+                assert_eq!(severity_for(&f), *want, "{name}");
+            }
+        }
     }
 
-    #[test]
-    fn a_lockfile_resolved_finding_sits_on_the_manifest_line() {
-        // The diagnostic goes where the user can edit; related information
-        // says where the version was actually resolved.
-        let f = Finding {
-            declared: Some(Anchor::new(Site::new(
-                "/p/package.json",
-                crate::model::Range::whole_line(5),
-            ))),
-            ..lockfile_resolved()
-        };
-        let d = finding_diagnostic(&f, false).expect("a finding with advisories renders");
-        assert_eq!(d.range.start.line, 4, "want the manifest line");
-        let related = d.related_information.expect("a link to the lockfile");
-        assert_eq!(related.len(), 1);
-        assert!(
-            related[0]
-                .location
-                .uri
-                .path()
-                .as_str()
-                .ends_with("/p/package-lock.json")
-        );
+    mod summary {
+        use super::*;
+
+        #[test]
+        fn the_summary_anchors_on_a_line_the_manifest_must_have() {
+            // Line 1 would not survive reformatting, so each format has a
+            // declaration the anchor hunts for instead.
+            let source = "{\n  \"name\": \"x\",\n  \"dependencies\": {}\n}\n";
+            assert_eq!(
+                summary_anchor_line(Path::new("/p/package.json"), Some(source)),
+                2
+            );
+            // With nothing to read, line 1 is the honest fallback.
+            assert_eq!(summary_anchor_line(Path::new("/p/package.json"), None), 1);
+        }
+
+        #[test]
+        fn a_summary_leads_when_more_than_one_thing_is_wrong() {
+            // Per-package diagnostics scatter; the summary is the one line that
+            // says the file has a problem.
+            let findings = [with("a", 9.8, 3), with("b", 7.5, 4), with("c", 5.0, 5)];
+            let diagnostics = for_file(Path::new("/p/package.json"), &findings, Encoding::Utf8);
+            assert_eq!(diagnostics.len(), 4, "three findings plus a summary");
+
+            let summary = &diagnostics[0];
+            assert_eq!(summary.code, Some(NumberOrString::String("summary".into())));
+            for want in [
+                "3 vulnerable dependencies",
+                "1 critical",
+                "1 high",
+                "1 medium",
+            ] {
+                assert!(
+                    summary.message.contains(want),
+                    "{:?} lacks {want}",
+                    summary.message
+                );
+            }
+            // Nothing to read at that path, so the first line is the anchor.
+            assert_eq!(summary.range.start.line, 0);
+            assert_eq!(summary.data.as_ref().unwrap()["summary"], true);
+        }
+
+        #[test]
+        fn one_finding_is_its_own_summary() {
+            let diagnostics = for_file(
+                Path::new("/p/package.json"),
+                &[with("a", 9.8, 3)],
+                Encoding::Utf8,
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert_ne!(
+                diagnostics[0].code,
+                Some(NumberOrString::String("summary".into()))
+            );
+        }
     }
 
-    #[test]
-    fn finding_data_round_trips_what_a_code_action_needs() {
-        let fixed = Finding {
-            fix: Fix::Clears("9.9.9".into()),
-            ..finding()
-        };
-        let data = finding_diagnostic(&fixed, true)
+    mod data {
+        use super::*;
+
+        #[test]
+        fn fixed_version_is_omitted_rather_than_null() {
+            // A consumer testing for the key must not be handed `null`, which is
+            // what `Option` serialised to before.
+            for fix in [Fix::None, Fix::Partial] {
+                let data = finding_diagnostic(&Finding { fix, ..finding() }, false)
+                    .expect("a finding with advisories renders")
+                    .data
+                    .expect("data");
+                assert!(data.get("fixedVersion").is_none(), "{data}");
+            }
+
+            let data = finding_diagnostic(
+                &Finding {
+                    fix: Fix::Clears("4.18.0".into()),
+                    ..finding()
+                },
+                false,
+            )
             .expect("a finding with advisories renders")
             .data
-            .unwrap();
-        assert_eq!(data["ecosystem"], "npm");
-        assert_eq!(data["name"], "lodash");
-        assert_eq!(data["version"], "4.17.15");
-        assert_eq!(data["fixedVersion"], "9.9.9");
-        assert_eq!(data["direct"], true);
-        assert_eq!(data["advisories"], serde_json::json!(["GHSA-1"]));
+            .expect("data");
+            assert_eq!(data["fixedVersion"], "4.18.0");
+        }
 
-        let data = finding_diagnostic(&finding(), false)
-            .expect("a finding with advisories renders")
-            .data
-            .unwrap();
-        assert!(
-            data.get("fixedVersion").is_none(),
-            "omitted, not null: {data}"
-        );
+        #[test]
+        fn a_lockfile_resolved_finding_sits_on_the_manifest_line() {
+            // The diagnostic goes where the user can edit; related information
+            // says where the version was actually resolved.
+            let f = Finding {
+                declared: Some(Anchor::new(Site::new(
+                    "/p/package.json",
+                    crate::model::Range::whole_line(5),
+                ))),
+                ..lockfile_resolved()
+            };
+            let d = finding_diagnostic(&f, false).expect("a finding with advisories renders");
+            assert_eq!(d.range.start.line, 4, "want the manifest line");
+            let related = d.related_information.expect("a link to the lockfile");
+            assert_eq!(related.len(), 1);
+            assert!(
+                related[0]
+                    .location
+                    .uri
+                    .path()
+                    .as_str()
+                    .ends_with("/p/package-lock.json")
+            );
+        }
+
+        #[test]
+        fn finding_data_round_trips_what_a_code_action_needs() {
+            let fixed = Finding {
+                fix: Fix::Clears("9.9.9".into()),
+                ..finding()
+            };
+            let data = finding_diagnostic(&fixed, true)
+                .expect("a finding with advisories renders")
+                .data
+                .unwrap();
+            assert_eq!(data["ecosystem"], "npm");
+            assert_eq!(data["name"], "lodash");
+            assert_eq!(data["version"], "4.17.15");
+            assert_eq!(data["fixedVersion"], "9.9.9");
+            assert_eq!(data["direct"], true);
+            assert_eq!(data["advisories"], serde_json::json!(["GHSA-1"]));
+
+            let data = finding_diagnostic(&finding(), false)
+                .expect("a finding with advisories renders")
+                .data
+                .unwrap();
+            assert!(
+                data.get("fixedVersion").is_none(),
+                "omitted, not null: {data}"
+            );
+        }
     }
 }

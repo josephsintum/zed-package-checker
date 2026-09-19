@@ -11,7 +11,6 @@ mod api;
 mod config;
 mod db;
 mod diagnostics;
-mod digits;
 mod engine;
 mod extract;
 mod index;
@@ -21,10 +20,8 @@ mod manifest;
 mod matcher;
 mod osv;
 mod progress;
-mod pypi;
 mod read;
 mod scan;
-mod semver_like;
 mod span;
 #[cfg(test)]
 mod testing;

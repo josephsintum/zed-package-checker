@@ -1,4 +1,4 @@
-use crate::digits::{cmp_digits, components_cmp};
+use super::digits::{cmp_digits, components_cmp};
 use std::cmp::Ordering;
 use std::sync::LazyLock;
 

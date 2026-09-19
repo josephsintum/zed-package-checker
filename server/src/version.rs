@@ -13,10 +13,15 @@
 //! with no allocation per comparison.
 
 use crate::model::Ecosystem;
-use crate::pypi::PyPiVersion;
-use crate::semver_like::SemverLike;
 use std::cmp::Ordering;
 use std::fmt;
+
+mod digits;
+mod pypi;
+mod semver_like;
+
+use pypi::PyPiVersion;
+use semver_like::SemverLike;
 
 /// A parsed version, ready to be compared against others in its ecosystem.
 #[derive(Clone, Debug)]

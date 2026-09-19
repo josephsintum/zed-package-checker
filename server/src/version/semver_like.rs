@@ -1,4 +1,4 @@
-use crate::digits::cmp_digits;
+use super::digits::cmp_digits;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 

@@ -6,7 +6,6 @@
 //! as diagnostics anchored on the manifest line the user can act on.
 
 mod action;
-pub mod alloc;
 mod api;
 mod config;
 mod db;
@@ -29,14 +28,19 @@ mod testing;
 pub mod model;
 pub mod version;
 
-pub use config::Config;
+// What the language server binary composes.
+pub use config::{Config, NAME};
 pub use db::{Database, DbError, Progress, default_root};
 pub use engine::{DEFAULT_DEBOUNCE, Engine, Publisher, Reason, Requester};
-pub use extract::{ExtractError, Extractor, SKIP_DIRS, is_manifest_name};
-pub use index::Index;
-pub use load::{ArchiveStats, LoadError, Strategy, load};
+pub use extract::{ExtractError, Extractor};
 pub use lsp::Backend;
-pub use matcher::Matcher;
 pub use progress::ClientProgress;
 pub use scan::{ScanError, Scanner, WorkspaceScanner};
-pub use span::{Encoding, LineIndex, column};
+
+// What the measurement binaries (`dbcheck`, `scanbench`) need beyond that.
+// Not a stable API: they live in this repository and move with the code.
+pub use extract::{SKIP_DIRS, is_manifest_name};
+pub use index::Index;
+pub use load::{ArchiveStats, LoadError, Strategy, load};
+pub use matcher::Matcher;
+pub mod alloc;

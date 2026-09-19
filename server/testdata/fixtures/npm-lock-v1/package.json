@@ -1,0 +1,7 @@
+{
+  "name": "npm-lock-v1-fixture",
+  "version": "1.0.0",
+  "dependencies": {
+    "mkdirp": "^0.5.1"
+  }
+}

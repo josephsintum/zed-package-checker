@@ -10,12 +10,13 @@ use std::path::Path;
 
 mod cargo;
 mod go;
-mod npm;
+pub(crate) mod npm;
 mod python;
 
 pub use cargo::{cargo_lock, cargo_self, cargo_toml};
 pub use go::go_mod;
 pub use npm::{package_json, package_lock};
+pub(crate) use npm::declarations;
 pub use python::{requirement_includes, requirements};
 
 /// What every manifest parser is: source text and a path in, sightings out.
@@ -38,6 +39,9 @@ fn sighting(
         from_range,
         // Set by `with_version_span` where the version can be rewritten.
         version_span: None,
+        // Set by `with_paths`, from the graph. A parser sees one file and
+        // cannot know what reaches a package.
+        paths: Vec::new(),
     }
 }
 

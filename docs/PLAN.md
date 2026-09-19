@@ -93,7 +93,7 @@ Because `Rust` and `Plain Text` are in the language list, the server starts for 
 | Vulnerability data | **OSV**, two sources the matcher cannot tell apart: per-package answers from osv.dev kept on disk, or the full ecosystem archives. See "Where the advisories come from" |
 | Ecosystems | **npm, Go, Python, Cargo** |
 | Manifests without lockfiles | Ranges scan at their lowest satisfying version and the finding says it was inferred. Installed-package scanning (`site-packages`, `node_modules`) for exact versions is a post-v1 follow-up |
-| npm workspaces | A root lockfile governs the manifests below it (done); transitive attribution to the member that pulls a package in is Stage 11 |
+| npm workspaces | A root lockfile governs the manifests below it, and a transitive package is attributed to the member that pulls it in (both done, Stage 11) |
 | Reachability | Not built; see "Not in scope" |
 | Extension shim | Rust → WASM, resolves binary by release tag, **verifies SHA-256** before executing |
 | Debounce | **1000 ms** (matches JetBrains) |
@@ -487,32 +487,92 @@ SHA-256** before marking it executable — and never from the worktree (see belo
 and confirm the shim refuses it and deletes it. Cut `v0.0.2`, the first release of this
 server.
 
-### Stage 11 — `graph`: npm transitive attribution, incl. workspaces
+### Stage 11 — `graph`: npm transitive attribution, incl. workspaces — **DONE**
 
-The largest piece of original work. A lockfile entry carries no parent links, so npm
-resolution must be reconstructed: for a node at path *P* depending on *N*, walk *P*'s
-ancestors for `<ancestor>/node_modules/N`; BFS from each root recording the first hop.
-Falls back to the v1 nested tree.
+*Rewritten 2026-09-19 to record what was built.*
 
-**Workspaces are in scope.** `package-lock.json` v2/v3 encodes them: `"packages/api":
-{...}` entries hold each sub-package's own dependencies, and `"node_modules/api":
-{"link": true, "resolved": "packages/api"}` maps the symlink. The BFS starts from
-*every* workspace root, and a finding is attributed to the sub-package manifest whose
-dependency reaches it — not the root `package.json`. Today a transitive package is
-reported on its lockfile line; a direct one on the manifest.
+A lockfile entry carries no parent links, so npm's resolution is reconstructed.
+`manifest/npm.rs` parses `package-lock.json` once into an install tree — `Lock`, one
+`LockNode` per entry with its install path, what it asked for, and where its name is
+written — and `graph.rs` walks it: resolve every edge once into an adjacency list, then
+breadth-first from each manifest, recording the first way each entry is met.
+`package_lock` became a thin view over the same parse, so nothing is read twice.
 
-**Explicitly deferred:** `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` have different
-structures and each needs its own graph builder.
+**What the user sees.** A transitive finding is anchored on the direct dependency's name
+in the `package.json` that declares it, and the message names the chain:
+`npm:minimist@1.2.0 — 4 advisories, worst Critical (CVSS 9.8). Fixed in 1.2.6. Pulled in
+by tar → mkdirp`. The summary says how many are transitive. No quick fix is offered:
+which `tar` version depends on a fixed `minimist` needs per-version registry metadata
+this server does not have, and guessing is worse than silence.
 
-**Already in place:** `reconcile` files every range declaration under the nearest
-lockfile that governs it, so a hoisted entry in the root lockfile is anchored on each
-member manifest that declares it — one finding per member. The graph only has to add
-the *transitive* attribution on top.
+**Where the squiggle sits changed with it.** Every finding used to underline the package
+name. It now underlines whatever the user would edit — the version digits for a direct
+dependency, the direct dependency's name for a transitive one, the name for anything
+anchored on a lockfile line. The version span already existed for the quick fix and was
+already computed in `diagnostics::for_file`, so the diagnostic range is now byte-for-byte
+the quick-fix edit range and there is no second span to keep in sync.
 
-**Gate:** an `npm-transitive` fixture anchors a 3-deep chain on the correct
-`package.json` line with `relatedInformation` pointing at the lockfile; an
-`npm-workspaces` fixture anchors on `packages/api/package.json`, not root.
-Table-driven tests for hoisting, nested duplicates, cycles, and links.
+**Resolution.** `<dir>/node_modules/<name>` for the entry's own directory and every
+ancestor, nearest first, stopping at the first hit — the nearest placement is the one
+satisfying the requirer's range. Every path segment is enumerated, not only
+`node_modules` boundaries, because a member at `packages/api` really does resolve through
+`packages/node_modules/` first. Candidates that cannot exist simply miss: `node_modules`
+is a name npm refuses to publish.
+
+**Edges** are followed by how a node was entered, not by the shape of its key.
+`devDependencies` only out of the manifest a walk started from — npm strips them from
+everything under `node_modules`, verified across four real lockfiles — so a linked member
+entered from a sibling cannot lend its test tooling to the sibling's production line.
+Peer edges run as a *second pass* over whatever nothing else reached, since a peer edge is
+a shorter route than the real install reason; that needs no ranking function and lets the
+honest chain always win.
+
+**Roots** are the empty key and directory keys, but only where the key holds no `..`
+component, the walk actually read that `package.json`, and no nearer lockfile governs it.
+Each condition closes a real hole: `{"link": true, "resolved": "../shared"}` is a `file:`
+dependency outside the tree and would have published diagnostics for a file outside the
+project; a member excluded by the skip list would become a root the report says is absent;
+a member with its own lockfile would be reported twice at two versions.
+
+**v1 normalises into the same tree** — install paths synthesised from the nesting, edges
+from `requires` — so one algorithm serves both. `requires` is the boolean `true` at the
+file's root and a map on an entry, and an entry without one is a leaf: the nested
+`dependencies` map is a *placement*, a subset of the edges and never a superset, so
+reading it as edges would lose the hoisted majority. A v1 file with no `requires`
+anywhere (npm 5.0–5.1) records no edges at all and is skipped rather than guessed at. v1
+predates workspaces, so it has exactly one root — which had to be synthesised, since v1
+writes no entry for the project itself.
+
+**Two live bugs were found and fixed on the way in.** Aliased packages were scanned under
+the wrong name and silently missed: `"h3-v2": "npm:h3@^2"` writes
+`"node_modules/h3-v2": {"name": "h3"}`, and the parser took the name from the key.
+Measured across 71 real lockfiles and ~12,000 entries, `name` appears on 28 and **every
+one is an alias**, so preferring it is safe. And `devOptional`, which npm writes *instead
+of* `dev` and `optional`, was unread, so those were never demoted.
+
+**Determinism is explicit.** Nodes are held in lockfile key order and the path index is
+never iterated; `reconcile`'s `push` now states its precedence — a declaration outranks a
+chain, a shorter chain outranks a longer one — where before the winner was decided by the
+order `WalkBuilder` happened to reach files in, which also decided the published severity
+through `dep_groups`. Those groups now merge by "ships if any route ships it" instead of
+"first non-empty wins".
+
+**Known npm blind spot, not fixable here:** `bundleDependencies` targets are not lock keys
+at all, so bundled transitive packages are invisible to the scanner entirely — not merely
+unattributed. Recorded here beside the deferred lockfiles so it is not rediscovered as a
+bug.
+
+**Still deferred:** `pnpm-lock.yaml`, `yarn.lock` and `bun.lock` record different
+structures and each needs its own builder. Until one exists their transitive dependencies
+keep the lockfile anchoring they have today.
+
+**Gate:** met. `npm-transitive` anchors a 3-deep chain (`tar → mkdirp → minimist`) on the
+right `package.json` line with `relatedInformation` pointing at the lockfile;
+`npm-workspaces` anchors `cookie` on `packages/api/package.json`, not root; `npm-lock-v1`
+covers the normalisation. Table-driven tests for hoisting, nested duplicates, cycles,
+links, dangling links, rejected roots, and the peer fallback. `tests/extraction.rs`
+asserts every chain, and scans each fixture twice in one process to prove no hash order
+reaches the output.
 
 ### Stage 12 — Go ecosystem — **DONE**
 
@@ -547,7 +607,8 @@ the edit is built, and nothing upstream changed.
 - **The span covers the digits alone**, never the operator, so `>=1.0.0 <2.0.0` becomes
   `>=1.4.0 <2.0.0` rather than losing its upper bound, and `v1.6.0` in a `go.mod` keeps
   its `v`. No operator is ever reconstructed, which is what the original plan would have
-  required.
+  required. *Since Stage 11 this span is also the diagnostic's own range*, so the
+  squiggle shows exactly which bytes the key replaces, and the two can never drift.
 - **Lockfiles are never rewritten** — that would mean rewriting integrity hashes and
   resolved URLs — so `package_lock` and `cargo_lock` record no span. Where a lockfile
   pinned the version the action still edits the manifest, and says so in its title:

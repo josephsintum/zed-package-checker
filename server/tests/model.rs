@@ -378,6 +378,7 @@ fn ecosystems_of_is_sorted_and_deduplicated() {
         dep_groups: Vec::new(),
         from_range: false,
         version_span: None,
+        paths: Vec::new(),
     })
     .collect::<Vec<_>>();
     assert_eq!(

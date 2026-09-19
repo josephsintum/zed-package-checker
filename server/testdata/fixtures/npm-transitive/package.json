@@ -1,0 +1,7 @@
+{
+  "name": "npm-transitive-fixture",
+  "version": "1.0.0",
+  "dependencies": {
+    "tar": "4.4.0"
+  }
+}

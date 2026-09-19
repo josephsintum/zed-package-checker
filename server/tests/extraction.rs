@@ -15,7 +15,7 @@ use package_checker::model::{Ecosystem, ExtractedPackage};
 use std::path::Path;
 
 /// One extracted package, flattened to what a reader can check by eye:
-/// `ecosystem:name@version file line start-end [flags]`.
+/// `ecosystem:name@version file line start-end [via=a>b] [flags]`.
 fn describe(root: &Path, p: &ExtractedPackage) -> String {
     let rel = |path: &Path| {
         path.strip_prefix(root)
@@ -40,6 +40,14 @@ fn describe(root: &Path, p: &ExtractedPackage) -> String {
             declared.range.start.column,
             declared.range.end.column
         ));
+    }
+    if let Some(path) = p.paths.iter().min_by_key(|path| path.len()) {
+        // The chain ends with the package itself, which the line already names.
+        let hops: Vec<&str> = path
+            .split_last()
+            .map(|(_, hops)| hops.iter().map(|key| &*key.name).collect())
+            .unwrap_or_default();
+        line.push_str(&format!(" via={}", hops.join(">")));
     }
     if p.from_range {
         line.push_str(" [from-range]");
@@ -112,6 +120,55 @@ fn cargo_reports_the_locked_version_and_keeps_the_declaration() {
 }
 
 #[test]
+fn a_transitive_dependency_is_anchored_on_what_pulled_it_in() {
+    // Nothing in package.json names `minimist` or `mkdirp`; the project
+    // depends on `tar`. Columns 5-8 are the `tar` line, which is the only one
+    // of the three a reader of this project can edit.
+    assert_eq!(
+        extract("npm-transitive"),
+        [
+            "npm:minimist@1.2.0 package-lock.json 25 18-26 \
+             declared=package.json 4 5-8 via=tar>mkdirp",
+            "npm:mkdirp@0.5.1 package-lock.json 19 18-24 \
+             declared=package.json 4 5-8 via=tar",
+            "npm:tar@4.4.0 package-lock.json 13 18-21 declared=package.json 4 5-8",
+        ]
+    );
+}
+
+#[test]
+fn a_workspace_member_owns_what_it_reaches_rather_than_the_root() {
+    // One lockfile at the root, one manifest per member. `cookie` is hoisted to
+    // the root's `node_modules` and named by nobody, but only `packages/api`
+    // reaches it — so that is where it lands, not on the root package.json.
+    assert_eq!(
+        extract("npm-workspaces"),
+        [
+            "npm:cookie@0.4.0 package-lock.json 35 18-24 \
+             declared=packages/api/package.json 4 5-12 via=express",
+            "npm:express@4.17.1 package-lock.json 38 18-25 \
+             declared=packages/api/package.json 4 5-12",
+            "npm:lodash@4.17.15 package-lock.json 44 18-24 \
+             declared=packages/web/package.json 4 5-11",
+        ]
+    );
+}
+
+#[test]
+fn a_version_one_lockfile_attributes_from_its_requires_map() {
+    // v1 nests rather than listing install paths, and writes no entry for the
+    // project itself. Same attribution once it is normalised.
+    assert_eq!(
+        extract("npm-lock-v1"),
+        [
+            "npm:minimist@1.2.0 package-lock.json 12 5-13 \
+             declared=package.json 4 5-11 via=mkdirp",
+            "npm:mkdirp@0.5.1 package-lock.json 6 5-11 declared=package.json 4 5-11",
+        ]
+    );
+}
+
+#[test]
 fn a_crate_is_not_a_dependency_of_itself() {
     // Cargo.lock lists every [[package]] including the local crate, and nothing
     // in the entry says which one is local; the name comes from Cargo.toml.
@@ -170,3 +227,4 @@ fn every_fixture_yields_only_supported_ecosystems() {
         }
     }
 }
+

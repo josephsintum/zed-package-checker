@@ -12,7 +12,8 @@
 //! - `model` — domain types, `std` only
 //! - `span`, `read` — positions, and bounded file reads
 //! - `version` — per-ecosystem version ordering
-//! - `manifest`, `extract` — the parsers, with spans, and the walk that runs them
+//! - `manifest`, `graph` — the parsers with spans, and npm's install tree
+//! - `extract` — the walk that runs them, and reconciliation
 //! - `osv`, `index`, `load`, `db`, `api` — advisories: decoding, indexing, the cache, the network
 //! - `matcher`, `scan` — which advisories apply, composed into one scan
 //! - `engine` — when to scan, and what to publish
@@ -25,6 +26,7 @@ mod db;
 mod diagnostics;
 mod engine;
 mod extract;
+mod graph;
 mod index;
 mod load;
 mod lsp;

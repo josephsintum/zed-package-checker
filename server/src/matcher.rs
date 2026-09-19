@@ -39,7 +39,7 @@ impl<'a> Matcher<'a> {
                 advisories,
                 evidence: extracted.evidence.clone(),
                 declared: extracted.declared.clone().map(Anchor::new),
-                paths: Vec::new(),
+                paths: extracted.paths.clone(),
                 reachable: None,
                 from_range: extracted.from_range,
                 dep_groups: extracted.dep_groups.clone(),
@@ -226,6 +226,7 @@ mod tests {
             dep_groups: Vec::new(),
             from_range: false,
             version_span: None,
+            paths: Vec::new(),
         }
     }
 
@@ -603,6 +604,25 @@ mod tests {
 
     mod findings {
         use super::*;
+
+        #[test]
+        fn the_chain_that_reaches_a_package_survives_into_the_finding() {
+            // Without this the graph's work stops at the extractor and every
+            // finding claims to be direct, which is what `direct()` reports.
+            let index = index_of(vec![advisory(
+                "GHSA-1",
+                5.0,
+                vec![npm("minimist", vec![range("1.0.0", "1.2.6")], vec![])],
+            )]);
+            let chain = vec![
+                PackageKey::new(Ecosystem::Npm, "tar"),
+                PackageKey::new(Ecosystem::Npm, "minimist"),
+            ];
+            let reached = extracted("minimist", "1.2.0").with_paths(vec![chain.clone()]);
+            let found = Matcher::new(&index).findings(&[reached]);
+            assert_eq!(found[0].paths, vec![chain]);
+            assert!(!found[0].direct());
+        }
 
         #[test]
         fn an_advisory_for_another_package_never_matches() {

@@ -36,7 +36,9 @@ cannot tell them apart — `server/scripts/compare-sources.py` exists to prove t
   what `"offline": true` uses, and what the network path falls back to.
 
 Findings are anchored on the **manifest** line responsible rather than on a lockfile you
-never open, and the span covers the dependency's name rather than the whole line.
+never open, and the squiggle covers whatever you would edit — the version for a direct
+dependency, the name of the dependency that pulled it in for a transitive one — rather
+than the whole line.
 
 ## What you see
 
@@ -49,9 +51,16 @@ npm:lodash@4.17.15 — 6 advisories, worst High (CVSS 7.2). Fixed in 4.17.21
 
 Alongside it:
 
+- **Transitive dependencies attributed to what pulled them in.** Most vulnerabilities
+  are not in anything you declared. For npm, the install tree in `package-lock.json` is
+  reconstructed so the finding lands on the direct dependency responsible, in the
+  `package.json` that declares it — the root's, or the workspace member's — and names the
+  chain: *"npm:minimist@1.2.0 — 4 advisories, worst Critical (CVSS 9.8). Fixed in 1.2.6.
+  Pulled in by tar → mkdirp"*. The vulnerable package is always the subject; nothing
+  claims `tar` is vulnerable because of what it depends on.
 - **A summary per manifest** when more than one dependency is affected — "3 vulnerable
-  dependencies (2 high)" — anchored on the declaration every file of its kind must
-  contain, so it survives reformatting.
+  dependencies (2 high), 1 of them transitive" — anchored on the declaration every file
+  of its kind must contain, so it survives reformatting.
 - **Severity that reflects context.** Development-only dependencies are demoted; a
   malicious package is never demoted, because "remove this now" does not become less
   true for a dev dependency.
@@ -71,10 +80,15 @@ Alongside it:
 
 | Ecosystem | Read from | Precise spans |
 |---|---|---|
-| npm | `package.json`, `package-lock.json` | yes |
+| npm | `package.json`, `package-lock.json` (v1, v2 and v3) | yes |
 | Go | `go.mod` (with `replace` and `toolchain` applied) | yes |
 | Python | `requirements.txt`, and the files it includes with `-r` | yes |
 | Cargo | `Cargo.toml`, `Cargo.lock` | yes |
+
+Transitive attribution needs a lockfile, since a manifest names only what you asked for.
+It is npm-only for now — `pnpm-lock.yaml`, `yarn.lock` and `bun.lock` each record a
+different structure and need their own reader, so their transitive dependencies are still
+reported on their own lockfile lines.
 
 Lockfile-free projects still work: a constraint is resolved to its lowest satisfying
 version and the finding is marked as inferred. A lockfile, where present, supersedes the

@@ -265,17 +265,12 @@ impl Site {
 pub struct Anchor {
     /// Where the dependency is named.
     pub declaration: Site,
-    /// Where its version is written, when it is written textually.
-    pub version: Option<Site>,
 }
 
 impl Anchor {
-    /// An anchor with no separately located version.
+    /// An anchor on a declaration.
     pub fn new(declaration: Site) -> Self {
-        Anchor {
-            declaration,
-            version: None,
-        }
+        Anchor { declaration }
     }
 }
 
@@ -447,6 +442,22 @@ impl Advisory {
 /// The dependency group a development-only dependency belongs to.
 pub const DEV_GROUP: &str = "dev";
 
+/// A dependency a manifest names, and where the name is written.
+///
+/// Distinct from [`ExtractedPackage`] because it carries no version: a spec no
+/// version can be read from — `workspace:*`, `file:../shared`, a git URL —
+/// still declares the name, and a dependency graph needs the edge and somewhere
+/// to anchor what it reaches.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Declaration {
+    /// The name as written — an alias, where one is used.
+    pub name: Box<str>,
+    /// Where the user can act on it.
+    pub site: Site,
+    /// Groups the section implies, such as [`DEV_GROUP`]; empty means it ships.
+    pub groups: Vec<String>,
+}
+
 /// A dependency an extractor found, before any advisory has been consulted.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ExtractedPackage {
@@ -468,12 +479,21 @@ pub struct ExtractedPackage {
     /// Read only by the code action handler, which re-parses the one file it is
     /// acting on; nothing carries this through `reconcile` into a `Finding`.
     pub version_span: Option<Range>,
+    /// root -> ... -> package, shortest first. Empty means the dependency is
+    /// direct, which is what every parser produces: only the graph fills it.
+    pub paths: Vec<Vec<PackageKey>>,
 }
 
 impl ExtractedPackage {
     /// Records where the version literal is written, when it can be located.
     pub fn with_version_span(mut self, span: Option<Range>) -> Self {
         self.version_span = span;
+        self
+    }
+
+    /// Records the chains that reach this package from a manifest.
+    pub fn with_paths(mut self, paths: Vec<Vec<PackageKey>>) -> Self {
+        self.paths = paths;
         self
     }
 }

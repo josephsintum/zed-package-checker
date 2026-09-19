@@ -4,10 +4,12 @@
 //! one pass over one file: no second read to narrow a whole-line anchor down to
 //! the dependency's name.
 
+use crate::graph;
 use crate::manifest;
-use crate::model::{ExtractedPackage, Finding, Package, PackageKey, Range, Site};
+use crate::manifest::npm::Lock;
+use crate::model::{Declaration, ExtractedPackage, Finding, Package, PackageKey, Range, Site};
 use ignore::WalkBuilder;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// Directories never worth walking into.
@@ -101,6 +103,16 @@ impl Extractor {
         let mut files = 0usize;
         // Files named by `-r` that no parser would pick up by name.
         let mut includes: Vec<PathBuf> = Vec::new();
+        // What the npm graph is allowed to see. Held from the walk rather than
+        // re-read afterwards, so the graph can never attribute a finding to a
+        // manifest the report says does not exist — one excluded by the skip
+        // list, or lost past the file cap.
+        let mut manifests: HashMap<PathBuf, Vec<Declaration>> = HashMap::new();
+        let mut lock_dirs: HashSet<PathBuf> = HashSet::new();
+        // Ordered, because a `HashMap` is walked in a different order every
+        // process and the order sightings arrive in decides which of two
+        // answers for one package survives.
+        let mut locks: BTreeMap<PathBuf, (PathBuf, Lock)> = BTreeMap::new();
 
         if !root.is_dir() {
             return Err(ExtractError::Walk {
@@ -155,6 +167,7 @@ impl Extractor {
                 break;
             }
             let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let Some(parse) = parser_for(path) else {
                 continue;
             };
@@ -171,6 +184,32 @@ impl Extractor {
             }
             if is_requirements_name(path) {
                 includes.extend(unwalked_includes(path, &source));
+            }
+            let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
+            if name == "package.json" {
+                manifests.insert(path.to_path_buf(), manifest::declarations(&source, path));
+            }
+            // An npm lockfile is held rather than turned straight into
+            // sightings: the install tree it describes is what attributes a
+            // transitive dependency to a manifest, and reading a ten-megabyte
+            // file twice to recover it would cost more than keeping it.
+            if is_npm_lock_name(name) {
+                if let Some(tree) = manifest::npm::lock(&source) {
+                    lock_dirs.insert(dir.clone());
+                    let entry = (path.to_path_buf(), tree);
+                    // npm's own precedence, where both sit in one directory.
+                    match locks.entry(dir) {
+                        std::collections::btree_map::Entry::Vacant(slot) => {
+                            slot.insert(entry);
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut slot) => {
+                            if name == "npm-shrinkwrap.json" {
+                                slot.insert(entry);
+                            }
+                        }
+                    }
+                }
+                continue;
             }
             sightings.extend(parse(&source, path));
         }
@@ -190,9 +229,29 @@ impl Extractor {
             sightings.extend(manifest::requirements(&source, &path));
         }
 
+        let mut attributed = Attributed::default();
+        for (dir, (path, tree)) in &locks {
+            let seen = graph::Workspace {
+                manifests: &manifests,
+                lock_dirs: &lock_dirs,
+            };
+            for found in graph::attribute(tree, dir, &seen) {
+                attributed.add(&tree.nodes[found.node].span, path, found);
+            }
+            sightings.extend(tree.sightings(path).into_iter().map(|(_, s)| s));
+        }
+
         sightings.retain(|s| !is_own_crate(s, &cargo_self));
-        Ok(reconcile(sightings))
+        Ok(reconcile(sightings, &attributed))
     }
+}
+
+/// Whether a filename is one npm writes its resolved tree to.
+///
+/// Both formats are identical; `npm-shrinkwrap.json` is the one npm ships in a
+/// published package, and it outranks a `package-lock.json` beside it.
+fn is_npm_lock_name(name: &str) -> bool {
+    matches!(name, "package-lock.json" | "npm-shrinkwrap.json")
 }
 
 fn is_requirements_name(path: &Path) -> bool {
@@ -219,6 +278,14 @@ fn unwalked_includes(path: &Path, source: &str) -> Vec<PathBuf> {
 /// go on — accepted only when it names one declaration, since picking between
 /// `dependencies` and `devDependencies` by guesswork would edit the wrong one.
 pub(crate) fn version_span(sightings: &[ExtractedPackage], finding: &Finding) -> Option<Range> {
+    // A transitive dependency has no version in the file its diagnostic sits
+    // on: the anchor is the direct dependency that reaches it, whose version is
+    // not the one at fault. The name lookup below would already miss, but only
+    // by accident — and its single-declaration fallback could still match the
+    // wrong line, which would offer an edit that rewrites another package.
+    if !finding.direct() {
+        return None;
+    }
     let named = || {
         sightings.iter().filter(|s| {
             s.package.ecosystem() == finding.package.ecosystem()
@@ -299,6 +366,70 @@ fn scope_of(sighting: &ExtractedPackage) -> Scope {
     }
 }
 
+/// What the npm graph found, keyed by the lockfile line an entry sits on.
+///
+/// A lockfile holds one entry per install path, so its own site identifies it
+/// uniquely — and it is the one thing that survives the trip from
+/// [`Lock::sightings`] into a flat list of sightings.
+#[derive(Default)]
+struct Attributed(HashMap<(PathBuf, u32, u32), Vec<(Site, Vec<Vec<PackageKey>>)>>);
+
+impl Attributed {
+    fn key(path: &Path, span: &Range) -> (PathBuf, u32, u32) {
+        (path.to_path_buf(), span.start.line, span.start.column)
+    }
+
+    fn add(&mut self, span: &Range, path: &Path, found: graph::Attribution) {
+        self.0
+            .entry(Self::key(path, span))
+            .or_default()
+            .push((found.declared, found.paths));
+    }
+
+    fn of(&self, sighting: &ExtractedPackage) -> &[(Site, Vec<Vec<PackageKey>>)] {
+        self.0
+            .get(&Self::key(
+                &sighting.evidence.path,
+                &sighting.evidence.range,
+            ))
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Whether one answer for a package outranks another already recorded.
+///
+/// Explicit rather than left to the order the walk reached files in: a
+/// dependency the manifest declares itself outranks one reached through
+/// something else, because telling users their own declaration is transitive is
+/// worse than saying nothing, and a shorter chain outranks a longer one.
+fn supersedes(candidate: &ExtractedPackage, current: &ExtractedPackage) -> bool {
+    let depth = |p: &ExtractedPackage| p.paths.iter().map(Vec::len).min().unwrap_or(0);
+    match (candidate.paths.is_empty(), current.paths.is_empty()) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => depth(candidate) < depth(current),
+    }
+}
+
+/// The groups that survive when two sightings of one package are collapsed.
+///
+/// Empty means it ships, so a package reached by any shipping route ships —
+/// previously the first non-empty set won, which let the order the walk reached
+/// files in decide whether a finding was demoted.
+fn merged_groups(current: &[String], candidate: &[String]) -> Vec<String> {
+    if current.is_empty() || candidate.is_empty() {
+        return Vec::new();
+    }
+    let mut groups = current.to_vec();
+    for group in candidate {
+        if !groups.contains(group) {
+            groups.push(group.clone());
+        }
+    }
+    groups.sort();
+    groups
+}
+
 /// Resolves the same package seen in more than one file.
 ///
 /// A dependency appears twice — once as a range in `package.json`, once pinned
@@ -311,7 +442,7 @@ fn scope_of(sighting: &ExtractedPackage) -> Scope {
 /// the root, one manifest per member. A hoisted entry declared by several
 /// members is reported once per member, so each lands where its own author
 /// edits.
-fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
+fn reconcile(sightings: Vec<ExtractedPackage>, attributed: &Attributed) -> Vec<ExtractedPackage> {
     // Keyed by name within a project: a lockfile legitimately holds several
     // versions of one package, and all of those are kept.
     let mut locked: std::collections::HashSet<Scope> = Default::default();
@@ -352,9 +483,11 @@ fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
             .to_path_buf();
         let dedupe = (anchor_dir, sighting.package.clone());
         if let Some(&i) = seen.get(&dedupe) {
-            if out[i].dep_groups.is_empty() {
-                out[i].dep_groups = sighting.dep_groups;
+            let groups = merged_groups(&out[i].dep_groups, &sighting.dep_groups);
+            if supersedes(&sighting, &out[i]) {
+                out[i] = sighting;
             }
+            out[i].dep_groups = groups;
             return;
         }
         seen.insert(dedupe, out.len());
@@ -372,19 +505,33 @@ fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
             push(sighting, &mut out);
             continue;
         }
-        match declared.get(&scope) {
-            Some(sites) => {
-                for site in sites {
-                    push(
-                        ExtractedPackage {
-                            declared: Some(site.clone()),
-                            ..sighting.clone()
-                        },
-                        &mut out,
-                    );
+        let sites = declared.get(&scope).map_or(&[][..], Vec::as_slice);
+        let chains = attributed.of(&sighting);
+        if sites.is_empty() && chains.is_empty() {
+            push(sighting, &mut out);
+            continue;
+        }
+        for site in sites {
+            push(
+                ExtractedPackage {
+                    declared: Some(site.clone()),
+                    ..sighting.clone()
+                },
+                &mut out,
+            );
+        }
+        // Only where no manifest names the package itself: the graph answers
+        // "which declaration reaches this", which is a different question from
+        // "who declares this", and the second one wins where both apply.
+        for (site, paths) in chains {
+            push(
+                ExtractedPackage {
+                    declared: Some(site.clone()),
+                    ..sighting.clone()
                 }
-            }
-            None => push(sighting, &mut out),
+                .with_paths(paths.clone()),
+                &mut out,
+            );
         }
     }
 

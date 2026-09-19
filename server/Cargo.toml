@@ -1,5 +1,7 @@
 # One crate, flat modules: module privacy gives every dependency boundary this
-# server needs, so extra crates would buy nothing but directories.
+# server needs, so extra crates would buy nothing but directories. A member of
+# the workspace at the repository root, which owns the lockfile, the release
+# profile and clippy.toml.
 [package]
 name = "package-checker"
 version = "0.0.2"
@@ -47,15 +49,6 @@ futures = "0.3"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "test-util"] }
-
-# One profile for everything that is measured, so a binary-size or wall-time
-# number never quietly compares different optimisation settings.
-[profile.release]
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-strip = "symbols"
-panic = "abort"
 
 [lints.rust]
 missing_docs = "warn"

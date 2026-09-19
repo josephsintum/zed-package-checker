@@ -156,8 +156,9 @@ zed-package-checker/
   .github/workflows/{ci.yml,release.yml}
 ```
 
-`server/` is its own Cargo workspace, so it coexists with the root shim crate without
-either build reaching into the other.
+`server/` is a member of the Cargo workspace at the root, which owns the lockfile, the
+release profile and `clippy.toml`. Only the shim is a default member, so a bare
+`cargo build --target wasm32-wasip1` never tries to build the server for wasm.
 
 ### Core types (`model.rs`)
 

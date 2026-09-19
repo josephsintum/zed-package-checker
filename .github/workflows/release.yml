@@ -51,14 +51,13 @@ jobs:
 
       - name: Build
         shell: bash
-        working-directory: server
-        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }}
+        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release -p package-checker --target ${{ matrix.target }}
 
       - name: Name the asset
         shell: bash
         run: |
           mkdir -p assets
-          src=server/target/${{ matrix.target }}/release/package-checker-lsp
+          src=target/${{ matrix.target }}/release/package-checker-lsp
           name=package-checker-lsp-${{ matrix.target }}
           case "${{ matrix.target }}" in *windows*) src="$src.exe"; name="$name.exe";; esac
           cp "$src" "assets/$name"

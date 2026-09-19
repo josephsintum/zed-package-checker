@@ -22,7 +22,7 @@ import tempfile
 import threading
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SERVER = ROOT / "server" / "target" / "release" / "package-checker-lsp"
+SERVER = ROOT / "target" / "release" / "package-checker-lsp"
 FIXTURES = ROOT / "server" / "testdata" / "fixtures"
 ARCHIVE_DB = pathlib.Path.home() / "Library" / "Caches" / "zed-package-checker" / "db"
 TIMEOUT = 180

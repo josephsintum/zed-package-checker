@@ -23,8 +23,6 @@ jobs:
 
       # Through the Makefile, not by spelling the commands out again: a
       # contributor running `make lint` green must not still fail here.
-      # `server` is its own workspace, so the root `cargo fmt` does not reach
-      # it — `make fmt` and `make lint` are what do.
       - name: Lint
         run: make lint
 

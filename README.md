@@ -118,7 +118,7 @@ Requires a Rust toolchain with the `wasm32-wasip1` target for the extension half
 (pinned in `rust-toolchain.toml`).
 
 ```sh
-make server      # the language server, to server/target/release/
+make server      # the language server, to target/release/
 make extension   # the Zed shim, to wasm
 make test        # cargo test
 make lint        # cargo fmt --check + clippy -D warnings, both crates
@@ -133,7 +133,7 @@ first run, and `--options` sends settings:
 
 ```sh
 python3 scripts/lsp-smoke.py \
-  --binary server/target/release/package-checker-lsp \
+  --binary target/release/package-checker-lsp \
   --root path/to/project \
   --db-root /tmp/empty \
   --options '{"online":{"enabled":false}}'

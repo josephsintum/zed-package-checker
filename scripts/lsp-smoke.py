@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 
-DEFAULT_BINARY = "server/target/release/package-checker-lsp"
+DEFAULT_BINARY = "target/release/package-checker-lsp"
 
 
 def frame(payload: dict) -> bytes:

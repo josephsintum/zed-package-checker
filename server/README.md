@@ -27,10 +27,12 @@ server needs; `tests/boundaries.rs` checks the one it cannot.
 
 ## Building and running
 
+From the repository root, which owns the Cargo workspace:
+
 ```sh
-cargo build --release              # target/release/package-checker-lsp
-cargo test
-cargo clippy --all-targets
+cargo build --release -p package-checker   # target/release/package-checker-lsp
+cargo test --workspace
+cargo clippy --workspace --all-targets
 ```
 
 Point Zed at `target/release/package-checker-lsp` through

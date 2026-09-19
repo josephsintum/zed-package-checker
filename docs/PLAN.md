@@ -504,9 +504,10 @@ reported on its lockfile line; a direct one on the manifest.
 **Explicitly deferred:** `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` have different
 structures and each needs its own graph builder.
 
-**Known defect to fix on the way in:** `reconcile` keys the declaration map by exact
-directory while the lockfile lookup walks upward, so a workspace member's finding can
-lose its manifest anchor.
+**Already in place:** `reconcile` files every range declaration under the nearest
+lockfile that governs it, so a hoisted entry in the root lockfile is anchored on each
+member manifest that declares it — one finding per member. The graph only has to add
+the *transitive* attribution on top.
 
 **Gate:** an `npm-transitive` fixture anchors a 3-deep chain on the correct
 `package.json` line with `relatedInformation` pointing at the lockfile; an

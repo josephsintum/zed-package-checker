@@ -305,46 +305,87 @@ fn scope_of(sighting: &ExtractedPackage) -> Scope {
 /// in `package-lock.json`. The lockfile wins, because it says what is actually
 /// installed, but the manifest's location is carried forward as `declared`,
 /// because that is where the user can act.
+///
+/// A lockfile governs every manifest at or below its directory that has no
+/// nearer lockfile of its own, which is how a workspace works: one lockfile at
+/// the root, one manifest per member. A hoisted entry declared by several
+/// members is reported once per member, so each lands where its own author
+/// edits.
 fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
     // Keyed by name within a project: a lockfile legitimately holds several
     // versions of one package, and all of those are kept.
     let mut locked: std::collections::HashSet<Scope> = Default::default();
-    let mut declared: HashMap<Scope, Site> = HashMap::new();
     for sighting in &sightings {
+        if !sighting.from_range {
+            locked.insert(scope_of(sighting));
+        }
+    }
+    // Every declaration, filed under the lockfile that governs it.
+    let mut declared: HashMap<Scope, Vec<Site>> = HashMap::new();
+    for sighting in &sightings {
+        if !sighting.from_range {
+            continue;
+        }
         let scope = scope_of(sighting);
-        if sighting.from_range {
-            declared
-                .entry(scope)
-                .or_insert_with(|| sighting.evidence.clone());
-        } else {
-            locked.insert(scope);
+        if let Some(dir) = nearest_lock(&locked, &scope) {
+            let sites = declared
+                .entry(Scope {
+                    dir,
+                    package: scope.package,
+                })
+                .or_default();
+            if !sites.contains(&sighting.evidence) {
+                sites.push(sighting.evidence.clone());
+            }
         }
     }
 
     let mut seen: HashMap<(PathBuf, Package), usize> = HashMap::new();
     let mut out: Vec<ExtractedPackage> = Vec::with_capacity(sightings.len());
-
-    for mut sighting in sightings {
-        let scope = scope_of(&sighting);
-        if sighting.from_range && locked_at_or_above(&locked, &scope) {
-            // Superseded by a lockfile governing this project. Its location is
-            // still used, through `declared`.
-            continue;
-        }
-        let dedupe = (scope.dir.clone(), sighting.package.clone());
+    let mut push = |sighting: ExtractedPackage, out: &mut Vec<ExtractedPackage>| {
+        let anchor_dir = sighting
+            .declared
+            .as_ref()
+            .map_or(&sighting.evidence.path, |d| &d.path)
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+        let dedupe = (anchor_dir, sighting.package.clone());
         if let Some(&i) = seen.get(&dedupe) {
             if out[i].dep_groups.is_empty() {
                 out[i].dep_groups = sighting.dep_groups;
             }
-            continue;
-        }
-        if let Some(site) = declared.get(&scope)
-            && *site != sighting.evidence
-        {
-            sighting.declared = Some(site.clone());
+            return;
         }
         seen.insert(dedupe, out.len());
         out.push(sighting);
+    };
+
+    for sighting in sightings {
+        let scope = scope_of(&sighting);
+        if sighting.from_range {
+            if nearest_lock(&locked, &scope).is_some() {
+                // Superseded by a lockfile governing this manifest. Its
+                // location survives through `declared`.
+                continue;
+            }
+            push(sighting, &mut out);
+            continue;
+        }
+        match declared.get(&scope) {
+            Some(sites) => {
+                for site in sites {
+                    push(
+                        ExtractedPackage {
+                            declared: Some(site.clone()),
+                            ..sighting.clone()
+                        },
+                        &mut out,
+                    );
+                }
+            }
+            None => push(sighting, &mut out),
+        }
     }
 
     // Sorted so a scan of an unchanged tree publishes an unchanged report.
@@ -354,26 +395,31 @@ fn reconcile(sightings: Vec<ExtractedPackage>) -> Vec<ExtractedPackage> {
             .cmp(&b.package.key)
             .then_with(|| a.package.version.cmp(&b.package.version))
             .then_with(|| a.evidence.path.cmp(&b.evidence.path))
+            .then_with(|| {
+                let site = |p: &ExtractedPackage| p.declared.as_ref().map(|d| d.path.clone());
+                site(a).cmp(&site(b))
+            })
     });
     out
 }
 
-/// Whether a lockfile in this directory or any ancestor pins this package.
+/// The directory of the nearest lockfile pinning this package, here or in any
+/// ancestor.
 ///
 /// Walking upwards is what makes npm workspaces work: one lockfile at the
 /// repository root governs `packages/app/package.json` below it.
-fn locked_at_or_above(locked: &std::collections::HashSet<Scope>, scope: &Scope) -> bool {
+fn nearest_lock(locked: &std::collections::HashSet<Scope>, scope: &Scope) -> Option<PathBuf> {
     let mut dir = scope.dir.as_path();
     loop {
         if locked.contains(&Scope {
             dir: dir.to_path_buf(),
             package: scope.package.clone(),
         }) {
-            return true;
+            return Some(dir.to_path_buf());
         }
         match dir.parent() {
             Some(parent) if parent != dir => dir = parent,
-            _ => return false,
+            _ => return None,
         }
     }
 }
@@ -615,6 +661,160 @@ mod tests {
             ["4.17.21"],
             "the root lockfile governs the member"
         );
+    }
+
+    fn declared_paths(found: &[ExtractedPackage], name: &str) -> Vec<String> {
+        let mut paths: Vec<String> = found
+            .iter()
+            .filter(|p| p.package.name() == name)
+            .map(|p| {
+                let site = p.declared.as_ref().map_or(&p.evidence, |d| d);
+                site.path
+                    .to_string_lossy()
+                    .rsplit('/')
+                    .take(2)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn a_workspace_member_keeps_its_manifest_anchor() {
+        // The root lockfile supersedes the member's range, but the member's
+        // manifest is still where the user acts, so the finding must point
+        // there — not at a lockfile line nobody opens.
+        let root = tempfile::tempdir().expect("temp dir");
+        write_project(
+            root.path(),
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"ws","version":"1.0.0","workspaces":["packages/*"]}"#,
+                ),
+                (
+                    "package-lock.json",
+                    r#"{"name":"ws","lockfileVersion":3,"packages":{
+                    "":{"name":"ws","version":"1.0.0"},
+                    "node_modules/lodash":{"version":"4.17.21"}}}"#,
+                ),
+            ],
+        );
+        write_project(
+            &root.path().join("packages/app"),
+            &[(
+                "package.json",
+                r#"{"name":"app","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}"#,
+            )],
+        );
+
+        let found = Extractor::new().extract(root.path()).expect("extract");
+        assert_eq!(declared_paths(&found, "lodash"), ["app/package.json"]);
+        let lodash = found.iter().find(|p| p.package.name() == "lodash").unwrap();
+        assert!(
+            lodash.evidence.path.ends_with("package-lock.json"),
+            "{lodash:?}"
+        );
+    }
+
+    #[test]
+    fn every_member_declaring_a_hoisted_package_gets_its_own_finding() {
+        // One hoisted lockfile entry, two members that declare it: each member
+        // manifest is where its own author acts.
+        let root = tempfile::tempdir().expect("temp dir");
+        write_project(
+            root.path(),
+            &[(
+                "package-lock.json",
+                r#"{"name":"ws","lockfileVersion":3,"packages":{
+                "":{"name":"ws","version":"1.0.0"},
+                "node_modules/lodash":{"version":"4.17.21"}}}"#,
+            )],
+        );
+        for member in ["app", "api"] {
+            write_project(
+                &root.path().join("packages").join(member),
+                &[(
+                    "package.json",
+                    r#"{"name":"m","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}"#,
+                )],
+            );
+        }
+
+        let found = Extractor::new().extract(root.path()).expect("extract");
+        assert_eq!(
+            declared_paths(&found, "lodash"),
+            ["api/package.json", "app/package.json"]
+        );
+        assert_eq!(versions_of(&found, "lodash"), ["4.17.21", "4.17.21"]);
+    }
+
+    #[test]
+    fn a_member_with_its_own_lockfile_is_not_claimed_by_the_root() {
+        // The nearest lockfile governs a manifest. A member that pins its own
+        // copy is anchored by its own lock, and the root lock's entry belongs
+        // to the root manifest alone.
+        let root = tempfile::tempdir().expect("temp dir");
+        write_project(
+            root.path(),
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"ws","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}"#,
+                ),
+                (
+                    "package-lock.json",
+                    r#"{"name":"ws","lockfileVersion":3,"packages":{
+                    "":{"name":"ws","version":"1.0.0"},
+                    "node_modules/lodash":{"version":"4.17.21"}}}"#,
+                ),
+            ],
+        );
+        write_project(
+            &root.path().join("packages/app"),
+            &[
+                (
+                    "package.json",
+                    r#"{"name":"app","version":"1.0.0","dependencies":{"lodash":"^4.17.0"}}"#,
+                ),
+                (
+                    "package-lock.json",
+                    r#"{"name":"app","lockfileVersion":3,"packages":{
+                    "":{"name":"app","version":"1.0.0"},
+                    "node_modules/lodash":{"version":"4.17.20"}}}"#,
+                ),
+            ],
+        );
+
+        let found = Extractor::new().extract(root.path()).expect("extract");
+        let mut pairs: Vec<(String, String)> = found
+            .iter()
+            .filter(|p| p.package.name() == "lodash")
+            .map(|p| {
+                (
+                    declared_paths(std::slice::from_ref(p), "lodash").remove(0),
+                    p.package.version.to_string(),
+                )
+            })
+            .collect();
+        pairs.sort();
+        let root_name = root
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let mut want = vec![
+            ("app/package.json".to_owned(), "4.17.20".to_owned()),
+            (format!("{root_name}/package.json"), "4.17.21".to_owned()),
+        ];
+        want.sort();
+        assert_eq!(pairs, want);
     }
 
     #[test]

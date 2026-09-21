@@ -175,7 +175,7 @@ fn summary(path: &Path, findings: &[Finding], source: Option<&str>) -> Option<Di
     let line = summary_anchor_line(path, source);
     Some(Diagnostic {
         range: to_range(crate::model::Range::whole_line(line)),
-        severity: Some(severity_level(worst, false, None)),
+        severity: Some(severity_level(worst, false)),
         code: Some(NumberOrString::String("summary".to_owned())),
         source: Some(crate::config::NAME.to_owned()),
         message,
@@ -320,25 +320,24 @@ fn describe(severity: Severity, score: f64) -> String {
 fn severity_for(finding: &Finding) -> DiagnosticSeverity {
     if finding.malicious() {
         // Never demoted: "remove this now" does not become less true because
-        // the package is a development dependency or its code is unreachable.
+        // the package is a development dependency.
         return DiagnosticSeverity::ERROR;
     }
-    severity_level(finding.severity(), finding.dev(), finding.reachable)
+    severity_level(finding.severity(), finding.dev())
 }
 
-/// Lowers a severity for findings that are less likely to matter.
+/// Lowers a severity for a development dependency.
 ///
-/// Development dependencies do not ship, and code proven unreachable cannot be
-/// exploited through this project. Neither makes a finding false, so they are
-/// demoted rather than hidden.
-fn severity_level(severity: Severity, dev: bool, reachable: Option<bool>) -> DiagnosticSeverity {
+/// It does not ship, which makes the finding less likely to matter but not
+/// false, so it is demoted rather than hidden.
+fn severity_level(severity: Severity, dev: bool) -> DiagnosticSeverity {
     // Listed rather than tested with `>=`, so adding a severity means deciding
     // where it belongs.
     let base = match severity {
         Severity::Critical | Severity::High => DiagnosticSeverity::ERROR,
         _ => DiagnosticSeverity::WARNING,
     };
-    if !dev && reachable.unwrap_or(true) {
+    if !dev {
         return base;
     }
     // Demoted by exactly one step. `base` is only ever ERROR or WARNING.
@@ -415,7 +414,7 @@ pub fn file_uri(path: &Path) -> Option<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Advisory, Anchor, DEV_GROUP, Ecosystem, Package, Site};
+    use crate::model::{Advisory, DEV_GROUP, Ecosystem, Package, Site};
     use std::sync::Arc;
 
     fn advisory(id: &str, score: f64) -> Arc<Advisory> {
@@ -438,7 +437,6 @@ mod tests {
             evidence: Site::new("/p/package.json", crate::model::Range::whole_line(1)),
             declared: None,
             paths: Vec::new(),
-            reachable: None,
             from_range: false,
             dep_groups: Vec::new(),
             fix: Fix::None,
@@ -449,10 +447,10 @@ mod tests {
     fn lockfile_resolved() -> Finding {
         Finding {
             evidence: Site::new("/p/package-lock.json", crate::model::Range::whole_line(9)),
-            declared: Some(Anchor::new(Site::new(
+            declared: Some(Site::new(
                 "/p/package.json",
                 crate::model::Range::whole_line(1),
-            ))),
+            )),
             ..finding()
         }
     }
@@ -594,13 +592,19 @@ mod tests {
         #[test]
         fn a_deeper_chain_names_every_hop() {
             let message = message_for(&transitive(&["mkdirp", "minipass", "minimist"]), false);
-            assert!(message.contains("Pulled in by mkdirp → minipass"), "{message}");
+            assert!(
+                message.contains("Pulled in by mkdirp → minipass"),
+                "{message}"
+            );
         }
 
         #[test]
         fn a_very_deep_chain_is_elided_rather_than_read_out() {
             let message = message_for(&transitive(&["a", "b", "c", "d", "e", "target"]), false);
-            assert!(message.contains("Pulled in by a → b → c → d → …"), "{message}");
+            assert!(
+                message.contains("Pulled in by a → b → c → d → …"),
+                "{message}"
+            );
         }
 
         #[test]
@@ -626,141 +630,152 @@ mod tests {
             assert!(d.related_information.is_some());
         }
 
-    mod spans {
-        use super::*;
+        mod spans {
+            use super::*;
 
-        /// `"lodash"` sits at columns 5..11 of line 2, its version at 16..22.
-        const MANIFEST: &str = "{\n  \"dependencies\": {\n    \"lodash\": \"^4.17.0\"\n  }\n}\n";
+            /// `"lodash"` sits at columns 5..11 of line 2, its version at 16..22.
+            const MANIFEST: &str =
+                "{\n  \"dependencies\": {\n    \"lodash\": \"^4.17.0\"\n  }\n}\n";
 
-        /// The text one finding's diagnostic actually underlines.
-        ///
-        /// Written to a real file because `for_file` reads the manifest to
-        /// locate the version — the other tests here pass a path that does not
-        /// exist, and so only ever exercise the no-source path.
-        fn underlined(build: impl FnOnce(&Path) -> Finding) -> String {
-            let dir = tempfile::tempdir().expect("a temporary directory");
-            let path = dir.path().join("package.json");
-            std::fs::write(&path, MANIFEST).expect("write the manifest");
+            /// The text one finding's diagnostic actually underlines.
+            ///
+            /// Written to a real file because `for_file` reads the manifest to
+            /// locate the version — the other tests here pass a path that does not
+            /// exist, and so only ever exercise the no-source path.
+            fn underlined(build: impl FnOnce(&Path) -> Finding) -> String {
+                let dir = tempfile::tempdir().expect("a temporary directory");
+                let path = dir.path().join("package.json");
+                std::fs::write(&path, MANIFEST).expect("write the manifest");
 
-            let finding = build(&path);
-            let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
-            let diagnostic = rendered
-                .iter()
-                .find(|d| d.code != Some(NumberOrString::String("summary".to_owned())))
-                .expect("the finding renders");
-            let line = MANIFEST
-                .lines()
-                .nth(diagnostic.range.start.line as usize)
-                .expect("the span names a line that exists");
-            line[diagnostic.range.start.character as usize
-                ..diagnostic.range.end.character as usize]
-                .to_owned()
-        }
+                let finding = build(&path);
+                let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
+                let diagnostic = rendered
+                    .iter()
+                    .find(|d| d.code != Some(NumberOrString::String("summary".to_owned())))
+                    .expect("the finding renders");
+                let line = MANIFEST
+                    .lines()
+                    .nth(diagnostic.range.start.line as usize)
+                    .expect("the span names a line that exists");
+                line[diagnostic.range.start.character as usize
+                    ..diagnostic.range.end.character as usize]
+                    .to_owned()
+            }
 
-        /// A finding anchored on `lodash`'s name, as the parser reports it.
-        fn on_lodash(path: &Path) -> Site {
-            Site::new(path, crate::model::Range::on_line(2, 5, 11))
-        }
+            /// A finding anchored on `lodash`'s name, as the parser reports it.
+            fn on_lodash(path: &Path) -> Site {
+                Site::new(path, crate::model::Range::on_line(2, 5, 11))
+            }
 
-        #[test]
-        fn a_direct_finding_underlines_the_version() {
-            assert_eq!(
-                underlined(|path| Finding {
+            #[test]
+            fn a_direct_finding_underlines_the_version() {
+                assert_eq!(
+                    underlined(|path| Finding {
+                        evidence: on_lodash(path),
+                        declared: None,
+                        ..finding()
+                    }),
+                    "4.17.0"
+                );
+            }
+
+            #[test]
+            fn the_operator_is_left_outside_the_span() {
+                // `>=1.0 <2.0` has to keep its upper bound when the lower one is
+                // bumped, which is why the parser narrows to the digits at all.
+                assert!(
+                    !underlined(|path| Finding {
+                        evidence: on_lodash(path),
+                        declared: None,
+                        ..finding()
+                    })
+                    .contains('^')
+                );
+            }
+
+            #[test]
+            fn replacing_the_underlined_text_is_what_the_quick_fix_does() {
+                // The diagnostic range and the edit range are one range, so the
+                // squiggle shows exactly which bytes pressing the key replaces.
+                let text = underlined(|path| Finding {
                     evidence: on_lodash(path),
                     declared: None,
                     ..finding()
-                }),
-                "4.17.0"
-            );
-        }
+                });
+                let updated = MANIFEST.replacen(&text, "4.18.0", 1);
+                assert!(updated.contains("\"^4.18.0\""), "{updated}");
+            }
 
-        #[test]
-        fn the_operator_is_left_outside_the_span() {
-            // `>=1.0 <2.0` has to keep its upper bound when the lower one is
-            // bumped, which is why the parser narrows to the digits at all.
-            assert!(!underlined(|path| Finding {
-                evidence: on_lodash(path),
-                declared: None,
-                ..finding()
-            })
-            .contains('^'));
-        }
+            #[test]
+            fn a_transitive_finding_underlines_the_dependency_that_reaches_it() {
+                // Nothing on this line is `minimist`'s version, so the name of the
+                // thing that pulled it in is the only honest thing to point at.
+                assert_eq!(
+                    underlined(|path| Finding {
+                        declared: Some(on_lodash(path)),
+                        evidence: Site::new(
+                            path.with_file_name("package-lock.json"),
+                            crate::model::Range::whole_line(9)
+                        ),
+                        ..transitive(&["lodash", "minimist"])
+                    }),
+                    "lodash"
+                );
+            }
 
-        #[test]
-        fn replacing_the_underlined_text_is_what_the_quick_fix_does() {
-            // The diagnostic range and the edit range are one range, so the
-            // squiggle shows exactly which bytes pressing the key replaces.
-            let text = underlined(|path| Finding {
-                evidence: on_lodash(path),
-                declared: None,
-                ..finding()
-            });
-            let updated = MANIFEST.replacen(&text, "4.18.0", 1);
-            assert!(updated.contains("\"^4.18.0\""), "{updated}");
-        }
+            #[test]
+            fn a_transitive_finding_points_at_the_lockfile_line_it_resolved_on() {
+                // The gate for this stage: the diagnostic sits on a manifest line
+                // the file never mentions the package on, so the link to where it
+                // actually resolved is the only way to see why it is there. Driven
+                // through `for_file` rather than the private renderer, since that
+                // is the path the server publishes from.
+                let dir = tempfile::tempdir().expect("a temporary directory");
+                let path = dir.path().join("package.json");
+                std::fs::write(&path, MANIFEST).expect("write the manifest");
+                let lockfile = path.with_file_name("package-lock.json");
 
-        #[test]
-        fn a_transitive_finding_underlines_the_dependency_that_reaches_it() {
-            // Nothing on this line is `minimist`'s version, so the name of the
-            // thing that pulled it in is the only honest thing to point at.
-            assert_eq!(
-                underlined(|path| Finding {
-                    declared: Some(Anchor::new(on_lodash(path))),
-                    evidence: Site::new(
-                        path.with_file_name("package-lock.json"),
-                        crate::model::Range::whole_line(9)
-                    ),
+                let finding = Finding {
+                    declared: Some(on_lodash(&path)),
+                    evidence: Site::new(&lockfile, crate::model::Range::whole_line(9)),
                     ..transitive(&["lodash", "minimist"])
-                }),
-                "lodash"
-            );
-        }
+                };
+                let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
+                let linked = rendered
+                    .iter()
+                    .find_map(|d| d.related_information.as_ref())
+                    .expect("a transitive finding links to its lockfile line");
+                assert_eq!(linked.len(), 1);
+                assert!(
+                    linked[0]
+                        .location
+                        .uri
+                        .as_str()
+                        .ends_with("package-lock.json"),
+                    "{:?}",
+                    linked[0].location.uri
+                );
+                assert_eq!(linked[0].location.range.start.line, 8, "the lockfile line");
+            }
 
-        #[test]
-        fn a_transitive_finding_points_at_the_lockfile_line_it_resolved_on() {
-            // The gate for this stage: the diagnostic sits on a manifest line
-            // the file never mentions the package on, so the link to where it
-            // actually resolved is the only way to see why it is there. Driven
-            // through `for_file` rather than the private renderer, since that
-            // is the path the server publishes from.
-            let dir = tempfile::tempdir().expect("a temporary directory");
-            let path = dir.path().join("package.json");
-            std::fs::write(&path, MANIFEST).expect("write the manifest");
-            let lockfile = path.with_file_name("package-lock.json");
-
-            let finding = Finding {
-                declared: Some(Anchor::new(on_lodash(&path))),
-                evidence: Site::new(&lockfile, crate::model::Range::whole_line(9)),
-                ..transitive(&["lodash", "minimist"])
-            };
-            let rendered = for_file(&path, std::slice::from_ref(&finding), Encoding::Utf8);
-            let linked = rendered
-                .iter()
-                .find_map(|d| d.related_information.as_ref())
-                .expect("a transitive finding links to its lockfile line");
-            assert_eq!(linked.len(), 1);
-            assert!(
-                linked[0].location.uri.as_str().ends_with("package-lock.json"),
-                "{:?}",
-                linked[0].location.uri
-            );
-            assert_eq!(linked[0].location.range.start.line, 8, "the lockfile line");
+            #[test]
+            fn a_summary_says_how_many_are_transitive() {
+                let findings = [
+                    Finding {
+                        evidence: Site::new("/p/package.json", crate::model::Range::whole_line(3)),
+                        ..finding()
+                    },
+                    transitive(&["lodash", "minimist"]),
+                ];
+                let rendered = summary(Path::new("/p/package.json"), &findings, Some(MANIFEST))
+                    .expect("two findings summarise");
+                assert!(
+                    rendered.message.contains("1 of them transitive"),
+                    "{}",
+                    rendered.message
+                );
+            }
         }
-
-        #[test]
-        fn a_summary_says_how_many_are_transitive() {
-            let findings = [
-                Finding {
-                    evidence: Site::new("/p/package.json", crate::model::Range::whole_line(3)),
-                    ..finding()
-                },
-                transitive(&["lodash", "minimist"]),
-            ];
-            let rendered = summary(Path::new("/p/package.json"), &findings, Some(MANIFEST))
-                .expect("two findings summarise");
-            assert!(rendered.message.contains("1 of them transitive"), "{}", rendered.message);
-        }
-    }
 
         #[test]
         fn a_fixable_finding_says_which_key_applies_it() {
@@ -808,7 +823,6 @@ mod tests {
             let f = Finding {
                 advisories: vec![advisory("MAL-2024-1", 0.0)],
                 dep_groups: vec![DEV_GROUP.to_owned()],
-                reachable: Some(false),
                 ..finding()
             };
             assert!(message_for(&f, false).starts_with("MALICIOUS: "));
@@ -969,10 +983,10 @@ mod tests {
             // The diagnostic goes where the user can edit; related information
             // says where the version was actually resolved.
             let f = Finding {
-                declared: Some(Anchor::new(Site::new(
+                declared: Some(Site::new(
                     "/p/package.json",
                     crate::model::Range::whole_line(5),
-                ))),
+                )),
                 ..lockfile_resolved()
             };
             let d = finding_diagnostic(&f, None).expect("a finding with advisories renders");

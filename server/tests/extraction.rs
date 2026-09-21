@@ -227,4 +227,3 @@ fn every_fixture_yields_only_supported_ecosystems() {
         }
     }
 }
-

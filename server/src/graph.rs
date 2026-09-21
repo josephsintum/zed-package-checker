@@ -93,7 +93,13 @@ pub(crate) fn attribute(tree: &Lock, lock_dir: &Path, seen: &Workspace<'_>) -> V
         a.node
             .cmp(&b.node)
             .then_with(|| a.declared.path.cmp(&b.declared.path))
-            .then_with(|| a.declared.range.start.line.cmp(&b.declared.range.start.line))
+            .then_with(|| {
+                a.declared
+                    .range
+                    .start
+                    .line
+                    .cmp(&b.declared.range.start.line)
+            })
     });
     out
 }
@@ -109,10 +115,8 @@ fn resolve_edges(tree: &Lock) -> Vec<Vec<Edge>> {
                     // A name that resolves to nothing is normal: an optional
                     // peer npm chose not to install, or a bundled dependency,
                     // which is not a lock key at all.
-                    tree.resolve(&node.path, &dep.name).map(|to| Edge {
-                        to,
-                        kind: dep.kind,
-                    })
+                    tree.resolve(&node.path, &dep.name)
+                        .map(|to| Edge { to, kind: dep.kind })
                 })
                 .collect()
         })
@@ -459,7 +463,10 @@ mod tests {
                 "node_modules/a",
                 r#"{"version": "1.0.0", "dependencies": {"lodash": "^3"}}"#,
             ),
-            ("node_modules/a/node_modules/lodash", r#"{"version": "3.0.0"}"#),
+            (
+                "node_modules/a/node_modules/lodash",
+                r#"{"version": "3.0.0"}"#,
+            ),
             (
                 "node_modules/b",
                 r#"{"version": "1.0.0", "dependencies": {"lodash": "^4"}}"#,

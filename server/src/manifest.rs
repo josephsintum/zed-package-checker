@@ -15,8 +15,8 @@ mod python;
 
 pub use cargo::{cargo_lock, cargo_self, cargo_toml};
 pub use go::go_mod;
-pub use npm::{package_json, package_lock};
 pub(crate) use npm::declarations;
+pub use npm::{package_json, package_lock};
 pub use python::{requirement_includes, requirements};
 
 /// What every manifest parser is: source text and a path in, sightings out.

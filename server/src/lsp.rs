@@ -67,9 +67,8 @@ fn watched_globs() -> Vec<FileSystemWatcher> {
 }
 
 /// Builds the scanner once the workspace root is known, which is not until
-/// `initialize`.
-/// Builds the scanner once the root is known, handed the live configuration so
-/// a `didChangeConfiguration` reaches it without rebuilding anything.
+/// `initialize`. Handed the live configuration so a `didChangeConfiguration`
+/// reaches it without rebuilding anything.
 type BuildScanner =
     dyn Fn(&Path, Requester, Arc<ArcSwap<Config>>) -> Arc<dyn crate::scan::Scanner> + Send + Sync;
 
@@ -635,7 +634,6 @@ mod tests {
                 ),
                 declared: None,
                 paths: Vec::new(),
-                reachable: None,
                 from_range: false,
                 dep_groups: Vec::new(),
                 fix: crate::model::Fix::None,

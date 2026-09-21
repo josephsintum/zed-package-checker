@@ -40,7 +40,6 @@ fn finding(pkg: Package, advisories: Vec<Advisory>) -> Finding {
         evidence: site("/p/package.json", 1),
         declared: None,
         paths: Vec::new(),
-        reachable: None,
         from_range: false,
         dep_groups: Vec::new(),
         fix: Fix::None,
@@ -311,7 +310,7 @@ fn anchor_site_falls_back_to_evidence() {
         "/p/package-lock.json"
     );
 
-    f.declared = Some(Anchor::new(site("/p/package.json", 4)));
+    f.declared = Some(site("/p/package.json", 4));
     assert_eq!(f.anchor_site().path.to_str().unwrap(), "/p/package.json");
     assert_eq!(f.anchor_site().range, Range::whole_line(4));
 }
@@ -322,12 +321,12 @@ fn report_groups_by_anchor_file() {
         Package::new(Ecosystem::Npm, "a", "1.0.0"),
         vec![advisory("GHSA-1", 1.0)],
     );
-    a.declared = Some(Anchor::new(site("/p/package.json", 2)));
+    a.declared = Some(site("/p/package.json", 2));
     let mut b = finding(
         Package::new(Ecosystem::Npm, "b", "1.0.0"),
         vec![advisory("GHSA-2", 1.0)],
     );
-    b.declared = Some(Anchor::new(site("/p/package.json", 3)));
+    b.declared = Some(site("/p/package.json", 3));
     let mut c = finding(
         Package::new(Ecosystem::Go, "c", "1.0.0"),
         vec![advisory("GHSA-3", 1.0)],

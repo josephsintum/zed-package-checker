@@ -6,7 +6,7 @@
 //! now depends on.
 
 use crate::index::Index;
-use crate::model::{Advisory, Anchor, ExtractedPackage, Finding, Fix, Package, PackageKey};
+use crate::model::{Advisory, ExtractedPackage, Finding, Fix, Package, PackageKey};
 use crate::version::Version;
 use std::sync::Arc;
 
@@ -38,9 +38,8 @@ impl<'a> Matcher<'a> {
                 package: extracted.package.clone(),
                 advisories,
                 evidence: extracted.evidence.clone(),
-                declared: extracted.declared.clone().map(Anchor::new),
+                declared: extracted.declared.clone(),
                 paths: extracted.paths.clone(),
-                reachable: None,
                 from_range: extracted.from_range,
                 dep_groups: extracted.dep_groups.clone(),
                 fix,

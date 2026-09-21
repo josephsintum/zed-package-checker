@@ -84,7 +84,7 @@ impl Extractor {
     /// # Errors
     ///
     /// [`ExtractError::Walk`] when `root` is not a directory. Anything less than
-    /// that — an unreadable subdirectory, an unparseable file — is skipped and logged.
+    /// that — an unreadable subdirectory, an unparsaable file — is skipped and logged.
     pub fn extract(&self, root: &Path) -> Result<Vec<ExtractedPackage>, ExtractError> {
         // Owned, because the walker's filter outlives this borrow of `self`.
         let skip: Vec<String> = SKIP_DIRS
@@ -366,16 +366,23 @@ fn scope_of(sighting: &ExtractedPackage) -> Scope {
     }
 }
 
+/// A lockfile line: the file, and the start of the entry's span within it.
+type LockLine = (PathBuf, u32, u32);
+
+/// One manifest declaration a lockfile entry is attributed to, and the chains
+/// that reach it from there.
+type Chain = (Site, Vec<Vec<PackageKey>>);
+
 /// What the npm graph found, keyed by the lockfile line an entry sits on.
 ///
 /// A lockfile holds one entry per install path, so its own site identifies it
 /// uniquely — and it is the one thing that survives the trip from
 /// [`Lock::sightings`] into a flat list of sightings.
 #[derive(Default)]
-struct Attributed(HashMap<(PathBuf, u32, u32), Vec<(Site, Vec<Vec<PackageKey>>)>>);
+struct Attributed(HashMap<LockLine, Vec<Chain>>);
 
 impl Attributed {
-    fn key(path: &Path, span: &Range) -> (PathBuf, u32, u32) {
+    fn key(path: &Path, span: &Range) -> LockLine {
         (path.to_path_buf(), span.start.line, span.start.column)
     }
 
@@ -386,7 +393,7 @@ impl Attributed {
             .push((found.declared, found.paths));
     }
 
-    fn of(&self, sighting: &ExtractedPackage) -> &[(Site, Vec<Vec<PackageKey>>)] {
+    fn of(&self, sighting: &ExtractedPackage) -> &[Chain] {
         self.0
             .get(&Self::key(
                 &sighting.evidence.path,
@@ -694,7 +701,10 @@ mod tests {
             // first — which is the order `WalkBuilder` happened to return.
             let direct = npm("lodash", "4.17.15", "/p/package.json", 3);
             let reached = via(&["express", "lodash"], direct.clone());
-            assert_eq!(survivor(vec![direct.clone(), reached.clone()]), "4.17.15 via ");
+            assert_eq!(
+                survivor(vec![direct.clone(), reached.clone()]),
+                "4.17.15 via "
+            );
             assert_eq!(survivor(vec![reached, direct]), "4.17.15 via ");
         }
 
@@ -703,7 +713,10 @@ mod tests {
             let at = npm("cookie", "0.4.0", "/p/package.json", 3);
             let near = via(&["express", "cookie"], at.clone());
             let far = via(&["a", "b", "cookie"], at);
-            assert_eq!(survivor(vec![far.clone(), near.clone()]), "0.4.0 via express");
+            assert_eq!(
+                survivor(vec![far.clone(), near.clone()]),
+                "0.4.0 via express"
+            );
             assert_eq!(survivor(vec![near, far]), "0.4.0 via express");
         }
     }

@@ -155,7 +155,7 @@ fn to_lsp(span: Range, lines: &[&str], encoding: Encoding) -> LspRange {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Advisory, Anchor, Ecosystem, Package, Site};
+    use crate::model::{Advisory, Ecosystem, Package, Site};
     use std::sync::Arc;
     use tower_lsp_server::ls_types::{
         CodeActionContext, PartialResultParams, TextDocumentIdentifier, Uri, WorkDoneProgressParams,
@@ -188,7 +188,6 @@ mod tests {
             evidence: sighting.evidence,
             declared: None,
             paths: Vec::new(),
-            reachable: None,
             from_range: true,
             dep_groups: Vec::new(),
             fix,
@@ -340,7 +339,7 @@ mod tests {
         let mut f = finding("lodash", Fix::Clears("4.18.0".into()));
         let declared = f.evidence.clone();
         f.evidence = Site::new("/p/package-lock.json", crate::model::Range::whole_line(9));
-        f.declared = Some(Anchor::new(declared));
+        f.declared = Some(declared);
 
         let actions = act(MANIFEST, std::slice::from_ref(&f), &params(&f));
         let CodeActionOrCommand::CodeAction(action) = &actions[0] else {

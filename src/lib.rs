@@ -9,8 +9,8 @@ use std::io::Read;
 
 use sha2::{Digest, Sha256};
 use zed_extension_api::{
-    self as zed, settings::LspSettings, Architecture, Command, DownloadedFileType,
-    LanguageServerId, LanguageServerInstallationStatus, Os, Result,
+    self as zed, Architecture, Command, DownloadedFileType, LanguageServerId,
+    LanguageServerInstallationStatus, Os, Result, settings::LspSettings,
 };
 
 /// Name of the language server executable.

@@ -351,7 +351,6 @@ mod tests {
             evidence: Site::new(path, Range::whole_line(1)),
             declared: None,
             paths: Vec::new(),
-            reachable: None,
             from_range: false,
             dep_groups: Vec::new(),
             fix: Fix::None,

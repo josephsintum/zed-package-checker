@@ -3,9 +3,9 @@
 use super::{first_per_name, lowest_satisfying, sighting};
 use crate::model::{DEV_GROUP, Declaration, Ecosystem, ExtractedPackage, Range, Site};
 use crate::span::LineIndex;
-use std::collections::HashMap;
 use jsonc_parser::ast::{Object, ObjectPropName, Value};
 use jsonc_parser::{CollectOptions, ParseOptions, parse_to_ast};
+use std::collections::HashMap;
 use std::path::Path;
 
 /// npm dependency sections, in the order a dependency should be attributed to
@@ -676,7 +676,10 @@ mod tests {
                     "node_modules/a",
                     r#"{"version": "1.0.0", "dependencies": {"lodash": "^3"}}"#,
                 ),
-                ("node_modules/a/node_modules/lodash", r#"{"version": "3.0.0"}"#),
+                (
+                    "node_modules/a/node_modules/lodash",
+                    r#"{"version": "3.0.0"}"#,
+                ),
             ]);
             let tree = lock(&src).unwrap();
             let found = tree.resolve("node_modules/a", "lodash").unwrap();
@@ -707,7 +710,10 @@ mod tests {
         #[test]
         fn a_scoped_package_nested_under_another_resolves() {
             let src = v3(&[
-                ("node_modules/a/node_modules/@acme/api", r#"{"version": "2.0.0"}"#),
+                (
+                    "node_modules/a/node_modules/@acme/api",
+                    r#"{"version": "2.0.0"}"#,
+                ),
                 ("node_modules/@acme/api", r#"{"version": "1.0.0"}"#),
             ]);
             let tree = lock(&src).unwrap();
@@ -721,7 +727,10 @@ mod tests {
             // candidates the upward walk generates and misses. If that ever
             // changed, this is the collision it would cause.
             let src = v3(&[
-                ("node_modules/@scope/node_modules", r#"{"version": "1.0.0"}"#),
+                (
+                    "node_modules/@scope/node_modules",
+                    r#"{"version": "1.0.0"}"#,
+                ),
                 ("node_modules/a", r#"{"version": "1.0.0"}"#),
             ]);
             let tree = lock(&src).unwrap();
@@ -887,7 +896,7 @@ mod tests {
             assert_eq!(tree.nodes.len(), 3);
             let found = tree.sightings(&at("package-lock.json"));
             assert_eq!(found.len(), 1);
-            assert_eq!(&*found[0].1.package.name(), "lodash");
+            assert_eq!(found[0].1.package.name(), "lodash");
         }
     }
 
@@ -911,8 +920,7 @@ mod tests {
             let found = super::super::declarations(src, &at("package.json"));
             let span = found[0].site.range;
             assert_eq!(
-                &src.lines().nth(2).unwrap()
-                    [span.start.column as usize..span.end.column as usize],
+                &src.lines().nth(2).unwrap()[span.start.column as usize..span.end.column as usize],
                 "lodash"
             );
         }

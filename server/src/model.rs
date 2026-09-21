@@ -183,7 +183,7 @@ impl fmt::Display for Package {
 /// client accepted utf-8, which is what the extractors produce natively.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct Position {
-    /// One-based line.
+    /// Zero-based line.
     pub line: u32,
     /// Zero-based column, in the unit the encoding decides.
     pub column: u32,
@@ -253,24 +253,6 @@ impl Site {
             path: path.into(),
             range,
         }
-    }
-}
-
-/// Where a dependency is declared, and where its version is written.
-///
-/// Two separate sites because they can genuinely live in different files — a
-/// range in `package.json`, the resolved version in `package-lock.json`.
-/// Conflating them is the bug `JetBrains` shipped.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Anchor {
-    /// Where the dependency is named.
-    pub declaration: Site,
-}
-
-impl Anchor {
-    /// An anchor on a declaration.
-    pub fn new(declaration: Site) -> Self {
-        Anchor { declaration }
     }
 }
 
@@ -508,7 +490,13 @@ pub fn ecosystems_of(packages: &[ExtractedPackage]) -> Vec<Ecosystem> {
 
 /// A vulnerable dependency and the advisories that apply to it.
 ///
-/// Advisories are shared rather than copied: one `Arc` bump per finding.
+/// `evidence` and `declared` are two separate sites because they can
+/// genuinely live in different files — a range in `package.json`, the resolved
+/// version in `package-lock.json`. Conflating them is the bug `JetBrains`
+/// shipped.
+///
+/// Advisories are behind an `Arc` so a finding is cheap to clone once built;
+/// the matcher copies each one out of the index, which holds them inline.
 #[derive(Clone, Debug)]
 pub struct Finding {
     /// The vulnerable package.
@@ -518,11 +506,9 @@ pub struct Finding {
     /// Where the package was actually found — a lockfile line, usually.
     pub evidence: Site,
     /// Where the user can act on it, when that is a different file.
-    pub declared: Option<Anchor>,
+    pub declared: Option<Site>,
     /// root -> ... -> package. Empty means the dependency is direct.
     pub paths: Vec<Vec<PackageKey>>,
-    /// `None` means no reachability analysis ran.
-    pub reachable: Option<bool>,
     /// The version came from resolving a range, not from reading a pin.
     pub from_range: bool,
     /// Dependency groups, such as [`DEV_GROUP`]; empty means it ships.
@@ -598,10 +584,7 @@ impl Finding {
     /// The site a diagnostic is anchored on: where the user can act, falling
     /// back to where the dependency was found.
     pub fn anchor_site(&self) -> &Site {
-        match &self.declared {
-            Some(anchor) => &anchor.declaration,
-            None => &self.evidence,
-        }
+        self.declared.as_ref().unwrap_or(&self.evidence)
     }
 }
 

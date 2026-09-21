@@ -29,7 +29,7 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// OSV's documented ceiling on one batch request.
@@ -98,19 +98,19 @@ impl ApiSource {
         let ttl = Duration::from_secs(config.online.ttl_hours.saturating_mul(3600));
 
         let mut out = Advisories::default();
-        let mut wanted: HashMap<Ecosystem, Vec<PackageKey>> = HashMap::new();
+        let mut wanted: HashMap<Ecosystem, Vec<String>> = HashMap::new();
 
         for (ecosystem, packages) in group_by_ecosystem(packages, &config) {
             let mut cache = Cache::read(&self.root, ecosystem);
-            let keys = self.resolve(ecosystem, &packages, &mut cache, ttl, &mut out)?;
+            let ids = self.resolve(ecosystem, &packages, &mut cache, ttl, &mut out)?;
             cache.write(&self.root, ecosystem);
-            wanted.insert(ecosystem, keys);
+            wanted.insert(ecosystem, ids);
         }
 
         // Decoded per ecosystem, because `into_model` keeps only the affected
         // entries for one and an advisory can name several.
-        for (ecosystem, keys) in wanted {
-            for id in self.ids_for(&keys, ecosystem) {
+        for (ecosystem, ids) in wanted {
+            for id in ids {
                 let Some(raw) = self.read_record(&id) else {
                     continue;
                 };
@@ -126,8 +126,7 @@ impl ApiSource {
 
     /// Brings `cache` up to date for these packages, fetching what is missing.
     ///
-    /// Returns the packages that have at least one advisory, which is the set
-    /// whose records are needed.
+    /// Returns the id of every record these packages need, each once.
     fn resolve(
         &self,
         ecosystem: Ecosystem,
@@ -135,7 +134,7 @@ impl ApiSource {
         cache: &mut Cache,
         ttl: Duration,
         out: &mut Advisories,
-    ) -> Result<Vec<PackageKey>, ApiError> {
+    ) -> Result<Vec<String>, ApiError> {
         let now = unix_now();
 
         // A package is already answered when we hold its complete set, or when
@@ -188,10 +187,15 @@ impl ApiSource {
             self.fetch_records(ecosystem, cache, &affected);
         }
 
+        // Read off the cache in hand rather than back from disk: it was just
+        // written, and parsing it again is the one thing this scan would pay
+        // twice for.
         Ok(packages
             .iter()
-            .filter(|(name, _)| cache.affected.contains_key(name))
-            .map(|(name, _)| PackageKey::new(ecosystem, name.as_str()))
+            .filter_map(|(name, _)| cache.affected.get(name))
+            .flat_map(|entry| entry.ids.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect())
     }
 
@@ -277,10 +281,7 @@ impl ApiSource {
             return;
         }
 
-        let Ok(pool) = rayon::ThreadPoolBuilder::new()
-            .num_threads(RECORD_CONCURRENCY)
-            .build()
-        else {
+        let Some(pool) = record_pool() else {
             return;
         };
         pool.install(|| {
@@ -309,16 +310,6 @@ impl ApiSource {
         response.body_mut().read_to_vec().ok()
     }
 
-    fn ids_for(&self, keys: &[PackageKey], ecosystem: Ecosystem) -> Vec<String> {
-        let cache = Cache::read(&self.root, ecosystem);
-        keys.iter()
-            .filter_map(|key| cache.affected.get(&*key.name))
-            .flat_map(|entry| entry.ids.iter().cloned())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect()
-    }
-
     fn record_path(&self, id: &str) -> PathBuf {
         self.root
             .join("api")
@@ -337,6 +328,25 @@ impl ApiSource {
         }
         write_atomic(&path, raw);
     }
+}
+
+/// The pool record downloads run on, built on first use and kept for the life
+/// of the process.
+///
+/// Its own pool rather than rayon's global one so the concurrency cap holds
+/// regardless of how many cores the machine has; kept rather than rebuilt so a
+/// scan does not spawn and tear down sixteen threads every time it misses the
+/// record cache. `None` when the pool could not be built, which is not an
+/// error worth failing a scan over: the records are simply not prefetched.
+fn record_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(RECORD_CONCURRENCY)
+            .build()
+            .ok()
+    })
+    .as_ref()
 }
 
 /// Packages worth asking about, grouped by ecosystem and deduplicated.
